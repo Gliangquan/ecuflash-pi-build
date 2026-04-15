@@ -45,7 +45,7 @@ jobs:
 
       - name: Build desktop package
         run: |
-          pyinstaller --noconfirm --clean --windowed --name ECUFlash --hidden-import PyQt5.sip frontend.py
+          pyinstaller --noconfirm --clean ECUFlash.spec
 
       - name: Pack Windows artifact
         if: matrix.os == 'windows-latest'

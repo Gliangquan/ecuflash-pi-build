@@ -41,6 +41,11 @@ qInstallMessageHandler(_qt_message_handler)
 USER_DATA_FILE_NAME = "session.dat"
 
 
+def _resource_path(*parts):
+    base_dir = getattr(sys, "_MEIPASS", os.path.dirname(os.path.abspath(__file__)))
+    return os.path.join(base_dir, *parts)
+
+
 API_BASE_URL = os.environ.get("ECUFLASH_API_BASE_URL", "http://107.148.176.142:8000/api/v1").rstrip("/")
 APP_VERSION = "1.0.0"
 APP_LOGO_FILE = "logo.png"
@@ -140,7 +145,7 @@ def _get_app_logo_pixmap(size=28):
 
         # Fallback to local logo file.
         if _APP_LOGO_PIXMAP_CACHE is None:
-            logo_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), APP_LOGO_FILE)
+            logo_path = _resource_path(APP_LOGO_FILE)
             if os.path.exists(logo_path):
                 local_pixmap = QPixmap(logo_path)
                 if not local_pixmap.isNull():
@@ -191,7 +196,7 @@ def _get_function_icon(title, size=42):
     cache_key = f"{icon_name}:{size}"
     if cache_key in _FUNCTION_ICON_CACHE:
         return _FUNCTION_ICON_CACHE[cache_key]
-    icon_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "icon", icon_name)
+    icon_path = _resource_path("icon", icon_name)
     if not os.path.exists(icon_path):
         return QIcon()
     pixmap = QPixmap(icon_path)
@@ -2728,8 +2733,8 @@ class ECUFlashWindow(QMainWindow):
         button.setProperty("cardAllowed", bool(is_allowed))
         button.setFixedSize(scaled_px(232), scaled_px(182))
         button.setSizePolicy(QSizePolicy.Fixed, QSizePolicy.Fixed)
-        button.setIcon(_get_function_icon(title, 88))
-        button.setIconSize(QSize(scaled_px(88), scaled_px(88)))
+        button.setIcon(_get_function_icon(title, 104))
+        button.setIconSize(QSize(scaled_px(104), scaled_px(104)))
         button.setToolButtonStyle(Qt.ToolButtonTextUnderIcon)
         button.setStyleSheet("""
             QToolButton {
@@ -2742,7 +2747,7 @@ class ECUFlashWindow(QMainWindow):
                 font-weight: 700;
                 border: 1px solid rgba(96, 165, 250, 0.42);
                 border-radius: 18px;
-                padding: 14px 12px 12px 12px;
+                padding: 10px 12px 10px 12px;
                 text-align: center;
                 line-height: 1.5;
             }
