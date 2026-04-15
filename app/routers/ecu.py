@@ -265,6 +265,28 @@ def _normalize_virtual_assets_for_client(raw_text: str, keyword: str = "") -> li
     return items
 
 
+def _list_all_enabled_function_names() -> list[str]:
+    sql = text(
+        """
+        SELECT name, MIN(sort_order) AS sort_order, MIN(id) AS first_id
+        FROM ecu_function
+        WHERE is_enabled = 1
+          AND name IS NOT NULL
+          AND name <> ''
+        GROUP BY name
+        ORDER BY sort_order ASC, first_id ASC
+        """
+    )
+    with get_conn() as conn:
+        rows = conn.execute(sql).mappings().all()
+    names = []
+    for row in rows:
+        name = str(row.get("name") or "").strip()
+        if name:
+            names.append(name)
+    return names
+
+
 def _build_runtime_dataset_payload(user: dict) -> dict:
     cars_sql = text(
         """
@@ -329,8 +351,6 @@ def _build_runtime_dataset_payload(user: dict) -> dict:
         patches = conn.execute(patches_sql).mappings().all()
         cpus = conn.execute(cpu_sql).mappings().all()
 
-    allowed_names = None if user.get("is_admin") else _get_user_allowed_function_names(int(user["id"]))
-
     model_by_car: dict[int, list[dict]] = {}
     for row in models:
         model_by_car.setdefault(row["car_series_id"], []).append(
@@ -349,8 +369,6 @@ def _build_runtime_dataset_payload(user: dict) -> dict:
 
     func_by_model: dict[int, list[dict]] = {}
     for row in functions:
-        if allowed_names is not None and str(row["name"]).strip() not in allowed_names:
-            continue
         func_by_model.setdefault(row["ecu_model_id"], []).append(
             {
                 "id": row["id"],
@@ -433,6 +451,7 @@ def _build_runtime_dataset_payload(user: dict) -> dict:
         "ecu_cpu_map": ecu_cpu_map,
         "checksum_addresses": checksum_addresses,
         "cpu_display_to_key": cpu_display_to_key,
+        "all_function_names": _list_all_enabled_function_names(),
     }
 
 

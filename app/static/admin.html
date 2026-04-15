@@ -219,6 +219,7 @@
         const learningArticleVisible = ref(false);
         const learningArticleSubmitting = ref(false);
         const learningArticleForm = reactive({ id: null, title: '', summary: '', cover_image_url: '', content_html: '', sort_order: 0, is_enabled: 1 });
+        const learningArticleImageUploading = ref(false);
         const createVisible = ref(false);
         const resetPasswordVisible = ref(false);
         const resetPasswordUser = ref(null);
@@ -679,6 +680,37 @@
           return uploadManagedFile(option, learningArticleForm);
         }
 
+        async function uploadLearningArticleImage(option) {
+          const formData = new FormData();
+          formData.append('file', option.fileItem.file);
+          learningArticleImageUploading.value = true;
+          try {
+            const resp = await fetch('/api/v1/admin/files/upload', {
+              method: 'POST',
+              headers: { Authorization: headers.value.Authorization || '' },
+              body: formData,
+            });
+            const data = await resp.json();
+            if (!resp.ok) throw new Error(data.detail || '上传失败');
+            const imageUrl = data.preview_url || data.file_url || '';
+            if (!imageUrl) throw new Error('未获取到图片地址');
+            const titleText = (option.fileItem && option.fileItem.name) ? option.fileItem.name.replace(/\.[^.]+$/, '') : '文章图片';
+            const imageBlock = `\n<p><img src="${imageUrl}" alt="${titleText}" /></p>\n`;
+            learningArticleForm.content_html = `${learningArticleForm.content_html || ''}${imageBlock}`.trim();
+            Message.success('正文图片已插入内容');
+            option.onSuccess(data);
+          } catch (err) {
+            Message.error(err.message || '上传失败');
+            option.onError(err);
+          } finally {
+            learningArticleImageUploading.value = false;
+          }
+        }
+
+        function insertLearningArticleParagraph() {
+          learningArticleForm.content_html = `${learningArticleForm.content_html || ''}\n<p>请输入正文内容</p>\n`.trim();
+        }
+
         async function uploadQrCode(option) {
           const formData = new FormData();
           formData.append('file', option.fileItem.file);
@@ -900,6 +932,7 @@
           learningArticleVisible,
           learningArticleSubmitting,
           learningArticleForm,
+          learningArticleImageUploading,
           login,
           createUser,
           toggleUser,
@@ -917,6 +950,8 @@
           deleteAsset,
           uploadAssetFile,
           uploadLearningArticleCover,
+          uploadLearningArticleImage,
+          insertLearningArticleParagraph,
           uploadQrCode,
           savePermissions,
           loadUserPermissions,
@@ -1491,7 +1526,20 @@
                     <a-form-item label="封面地址"><a-input v-model="learningArticleForm.cover_image_url" placeholder="可自动回填" /></a-form-item>
                   </div>
                 </div>
-                <a-form-item label="图文内容（HTML）"><a-textarea v-model="learningArticleForm.content_html" :auto-size="{ minRows: 10, maxRows: 18 }" placeholder="可直接粘贴图文 HTML 内容" /></a-form-item>
+                <a-form-item label="图文内容">
+                  <div style="display:grid;gap:10px;">
+                    <div style="display:flex;gap:12px;flex-wrap:wrap;align-items:center;">
+                      <a-upload :custom-request="uploadLearningArticleImage" :show-file-list="false">
+                        <template #upload-button>
+                          <a-button type="primary" :loading="learningArticleImageUploading">上传正文图片</a-button>
+                        </template>
+                      </a-upload>
+                      <a-button type="outline" @click="insertLearningArticleParagraph">插入正文段落</a-button>
+                      <span style="color:#86909c;font-size:12px;">上传图片后会自动插入正文，无需手写代码</span>
+                    </div>
+                    <a-textarea v-model="learningArticleForm.content_html" :auto-size="{ minRows: 12, maxRows: 20 }" placeholder="可直接输入正文内容，也可先点上方按钮插入图片和段落" />
+                  </div>
+                </a-form-item>
                 <a-grid :cols="2" :col-gap="12">
                   <a-grid-item>
                     <a-form-item label="排序"><a-input-number v-model="learningArticleForm.sort_order" :min="0" /></a-form-item>

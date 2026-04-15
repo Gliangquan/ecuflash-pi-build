@@ -15,6 +15,8 @@ import urllib.parse
 import urllib.request
 import tempfile
 import re
+import base64
+import mimetypes
 import PyQt5
 
 from PyQt5.QtWidgets import *
@@ -46,10 +48,10 @@ def _resource_path(*parts):
     return os.path.join(base_dir, *parts)
 
 
-API_BASE_URL = os.environ.get("ECUFLASH_API_BASE_URL", "http://107.148.176.142:8000/api/v1").rstrip("/")
+API_BASE_URL = os.environ.get("ECUFLASH_API_BASE_URL", "http://107.148.176.142/api/v1").rstrip("/")
 APP_VERSION = "1.0.0"
-APP_LOGO_FILE = "logo.png"
-APP_LOGO_URL = "http://60.205.252.1/logo.png"
+APP_LOGO_FILE = "icon.jpg"
+APP_LOGO_URL = ""
 
 UI_BASE_WIDTH = 1920
 UI_BASE_HEIGHT = 1080
@@ -191,9 +193,9 @@ def _guess_function_icon_filename(title):
     return "system-settings.png"
 
 
-def _get_function_icon(title, size=42):
+def _get_function_icon(title, size=42, muted=False):
     icon_name = _guess_function_icon_filename(title)
-    cache_key = f"{icon_name}:{size}"
+    cache_key = f"{icon_name}:{size}:{int(bool(muted))}"
     if cache_key in _FUNCTION_ICON_CACHE:
         return _FUNCTION_ICON_CACHE[cache_key]
     icon_path = _resource_path("icon", icon_name)
@@ -204,20 +206,27 @@ def _get_function_icon(title, size=42):
         return QIcon()
 
     scaled = pixmap.scaled(size, size, Qt.KeepAspectRatio, Qt.SmoothTransformation)
-    brightened = QPixmap(scaled.size())
-    brightened.fill(Qt.transparent)
+    rendered = QPixmap(scaled.size())
+    rendered.fill(Qt.transparent)
 
-    painter = QPainter(brightened)
+    painter = QPainter(rendered)
     painter.setRenderHint(QPainter.SmoothPixmapTransform, True)
     painter.drawPixmap(0, 0, scaled)
-    painter.setCompositionMode(QPainter.CompositionMode_Screen)
-    painter.fillRect(brightened.rect(), QColor(120, 220, 255, 28))
-    painter.setCompositionMode(QPainter.CompositionMode_SourceOver)
-    painter.setOpacity(0.12)
-    painter.drawPixmap(0, 0, scaled)
+    if muted:
+        painter.setCompositionMode(QPainter.CompositionMode_SourceIn)
+        painter.fillRect(rendered.rect(), QColor(168, 182, 201, 210))
+        painter.setCompositionMode(QPainter.CompositionMode_SourceOver)
+        painter.setOpacity(0.18)
+        painter.drawPixmap(0, 0, scaled)
+    else:
+        painter.setCompositionMode(QPainter.CompositionMode_Screen)
+        painter.fillRect(rendered.rect(), QColor(120, 220, 255, 28))
+        painter.setCompositionMode(QPainter.CompositionMode_SourceOver)
+        painter.setOpacity(0.12)
+        painter.drawPixmap(0, 0, scaled)
     painter.end()
 
-    icon = QIcon(brightened)
+    icon = QIcon(rendered)
     _FUNCTION_ICON_CACHE[cache_key] = icon
     return icon
 
@@ -427,6 +436,63 @@ def _open_url(url):
 
 def _open_browser_download(url):
     return _open_url(url)
+
+
+def _to_data_url(url):
+    resolved = _resolve_resource_url(url)
+    if not resolved:
+        return ""
+    try:
+        request = urllib.request.Request(resolved, headers={"Accept": "image/*"})
+        with urllib.request.urlopen(request, timeout=10) as response:
+            data = response.read()
+            content_type = response.headers.get_content_type() if response.headers else None
+
+        pixmap = QPixmap()
+        if pixmap.loadFromData(data):
+            if pixmap.width() > 260 or pixmap.height() > 360:
+                pixmap = pixmap.scaled(260, 360, Qt.KeepAspectRatio, Qt.SmoothTransformation)
+            buffer = QBuffer()
+            buffer.open(QIODevice.WriteOnly)
+            pixmap.save(buffer, "PNG")
+            data = bytes(buffer.data())
+            mime_type = "image/png"
+        else:
+            mime_type = content_type or mimetypes.guess_type(resolved)[0] or "image/png"
+
+        encoded = base64.b64encode(data).decode("ascii")
+        return f"data:{mime_type};base64,{encoded}"
+    except Exception:
+        return resolved
+
+
+def _normalize_learning_article_html(content_html):
+    html = str(content_html or "")
+    if not html.strip():
+        return ""
+    html = re.sub(r"<\/?(?:html|body)[^>]*>", "", html, flags=re.IGNORECASE)
+    html = re.sub(r"\sstyle\s*=\s*\"[^\"]*\"", "", html, flags=re.IGNORECASE)
+    html = re.sub(r"\sstyle\s*=\s*'[^']*'", "", html, flags=re.IGNORECASE)
+    html = re.sub(r"\sbgcolor\s*=\s*\"[^\"]*\"", "", html, flags=re.IGNORECASE)
+    html = re.sub(r"\sbgcolor\s*=\s*'[^']*'", "", html, flags=re.IGNORECASE)
+    html = re.sub(r"\swidth\s*=\s*\"[^\"]*\"", "", html, flags=re.IGNORECASE)
+    html = re.sub(r"\swidth\s*=\s*'[^']*'", "", html, flags=re.IGNORECASE)
+    html = re.sub(r"\sheight\s*=\s*\"[^\"]*\"", "", html, flags=re.IGNORECASE)
+    html = re.sub(r"\sheight\s*=\s*'[^']*'", "", html, flags=re.IGNORECASE)
+    html = re.sub(r"<table([^>]*)>", r"<table\1 cellpadding='8' cellspacing='0' border='1'>", html, flags=re.IGNORECASE)
+
+    def _replace_url_attr(match):
+        attr_name = match.group(1)
+        quote = match.group(2)
+        attr_value = match.group(3)
+        if attr_name.lower() == "src":
+            resolved = _to_data_url(attr_value)
+        else:
+            resolved = _resolve_resource_url(attr_value)
+        return f" {attr_name}={quote}{resolved}{quote}"
+
+    html = re.sub(r"\s(src|href)\s*=\s*([\"'])(.*?)\2", _replace_url_attr, html, flags=re.IGNORECASE)
+    return html
 
 
 def _copy_text_to_clipboard(text):
@@ -761,6 +827,26 @@ CAR_TYPE_ALIASES = {
 HIDDEN_FUNCTION_NAMES = {"无防盗"}
 
 
+def _collect_all_function_names(database):
+    names = []
+    seen = set()
+    if not isinstance(database, dict):
+        return names
+    for ecu_list in database.values():
+        if not isinstance(ecu_list, dict):
+            continue
+        for ecu_info in ecu_list.values():
+            functions = (ecu_info or {}).get("functions", {})
+            if not isinstance(functions, dict):
+                continue
+            for func_name in functions.keys():
+                if func_name in HIDDEN_FUNCTION_NAMES or func_name in seen:
+                    continue
+                seen.add(func_name)
+                names.append(func_name)
+    return names
+
+
 def _normalize_lookup_name(text):
     normalized = (
         text.upper()
@@ -886,6 +972,7 @@ CPU_DISPLAY_TO_KEY = {
     )
 }
 ECU_DATABASE = NORMALIZED_ECU_DATABASE
+ALL_FUNCTION_NAMES = []
 
 
 def _api_get_json(path, params=None, timeout=15):
@@ -913,17 +1000,20 @@ def load_remote_runtime_dataset(token):
         "ecu_cpu_map",
         "checksum_addresses",
         "cpu_display_to_key",
+        "all_function_names",
     }
     missing = required_keys - set(data.keys())
     if missing:
         raise ValueError(f"服务端数据缺少字段: {', '.join(sorted(missing))}")
 
-    global CAR_ECU_MAP, ECU_DATABASE, ECU_CPU_MAP, CHECKSUM_ADDRESSES, CPU_DISPLAY_TO_KEY
+    global CAR_ECU_MAP, ECU_DATABASE, ECU_CPU_MAP, CHECKSUM_ADDRESSES, CPU_DISPLAY_TO_KEY, FEATURE_ECU_DATABASE, ALL_FUNCTION_NAMES
     CAR_ECU_MAP = data["car_ecu_map"]
     ECU_DATABASE = data["ecu_database"]
+    FEATURE_ECU_DATABASE = data["ecu_database"]
     ECU_CPU_MAP = data["ecu_cpu_map"]
     CHECKSUM_ADDRESSES = data["checksum_addresses"]
     CPU_DISPLAY_TO_KEY = data["cpu_display_to_key"]
+    ALL_FUNCTION_NAMES = list(data.get("all_function_names") or [])
     print(
         "[API] DATASET SUMMARY "
         f"car_series={len(CAR_ECU_MAP)}, "
@@ -1891,7 +1981,7 @@ class ECUFlashWindow(QMainWindow):
         self.func_content.setStyleSheet("background: transparent; border: none;")
         self.func_content_layout = QVBoxLayout(self.func_content)
         self.func_content_layout.setContentsMargins(12, 16, 12, 16)
-        self.func_content_layout.setSpacing(scaled_px(14))
+        self.func_content_layout.setSpacing(scaled_px(20))
         self.func_content_layout.setAlignment(Qt.AlignTop)
         self.func_scroll.setWidget(self.func_content)
         right_layout.addWidget(self.func_scroll)
@@ -1986,6 +2076,18 @@ class ECUFlashWindow(QMainWindow):
         show_message(self, QMessageBox.Critical, "下载失败", "无法拉起浏览器下载")
         return False
 
+    def _view_resource_file(self, item):
+        link = (self._resource_preview_url(item) or item.get("url") or item.get("file_url") or "").strip()
+        if not link:
+            show_message(self, QMessageBox.Warning, "提示", "当前资源没有可查看内容")
+            return False
+        resolved = _resolve_resource_url(link)
+        if _open_url(resolved):
+            self.add_operation_log(f"资源查看已打开：{resolved}")
+            return True
+        show_message(self, QMessageBox.Critical, "查看失败", "无法打开资源内容")
+        return False
+
     def _show_resource_detail_dialog(self, item, title_text="资源详情"):
         dialog = QDialog(self)
         dialog.setWindowTitle(title_text)
@@ -2059,7 +2161,7 @@ class ECUFlashWindow(QMainWindow):
         dialog.exec_()
 
     def _show_wiring_guide_detail_dialog(self, item):
-        self._download_resource_file(item)
+        self._view_resource_file(item)
 
     def _open_wiring_guide_list_dialog(self, items):
         dialog = QDialog(self)
@@ -2082,10 +2184,10 @@ class ECUFlashWindow(QMainWindow):
         layout.addWidget(title)
 
         search_edit = QLineEdit(dialog)
-        search_edit.setPlaceholderText("输入 ECU 型号，例如 1234、12345、ME7.8.8")
+        search_edit.setPlaceholderText("输入接线图关键词")
         layout.addWidget(search_edit)
 
-        result_label = QLabel("请输入型号后搜索")
+        result_label = QLabel("请输入关键词后搜索")
         result_label.setStyleSheet("font-size:14px;color:#60A5FA;")
         layout.addWidget(result_label)
 
@@ -2102,28 +2204,28 @@ class ECUFlashWindow(QMainWindow):
             if keyword:
                 result_label.setText(f"搜索到 {len(result_items)} 条接线图")
             else:
-                result_label.setText("请输入型号后搜索")
+                result_label.setText("请输入关键词后搜索")
             for item in result_items:
-                list_widget.addItem(f"{item.get('name') or '-'} | ECU: {item.get('model') or '-'} | 车型: {item.get('car_model') or '-'}")
+                list_widget.addItem(f"{item.get('name') or '-'}")
 
-        def download_selected():
+        def view_selected():
             row = list_widget.currentRow()
             if row < 0 or row >= len(selected_items):
                 show_message(dialog, QMessageBox.Warning, "提示", "请先选择接线图")
                 return
-            self._download_resource_file(selected_items[row])
+            self._view_resource_file(selected_items[row])
 
         search_edit.textChanged.connect(lambda _=None: render_items())
-        list_widget.itemDoubleClicked.connect(lambda _: download_selected())
+        list_widget.itemDoubleClicked.connect(lambda _: view_selected())
         render_items()
 
         btn_row = QHBoxLayout()
         btn_row.addStretch()
-        download_btn = QPushButton("下载接线图")
-        download_btn.clicked.connect(download_selected)
+        view_btn = QPushButton("查看")
+        view_btn.clicked.connect(view_selected)
         close_btn = QPushButton("关闭")
         close_btn.clicked.connect(dialog.accept)
-        btn_row.addWidget(download_btn)
+        btn_row.addWidget(view_btn)
         btn_row.addWidget(close_btn)
         layout.addLayout(btn_row)
         dialog.exec_()
@@ -2171,7 +2273,12 @@ class ECUFlashWindow(QMainWindow):
             else:
                 result_label.setText("请输入关键词后搜索")
             for item in result_items:
-                list_widget.addItem(f"{item.get('name') or item.get('title') or '-'} | 文件: {item.get('file_name') or '-'}")
+                file_name = item.get('file_name') or ''
+                file_name = str(file_name).strip()
+                if file_name.lower().endswith('.bin'):
+                    list_widget.addItem(f"{item.get('name') or item.get('title') or '-'} | 下载bin文件")
+                else:
+                    list_widget.addItem(f"{item.get('name') or item.get('title') or '-'} | 文件: {file_name or '-'}")
 
         def download_selected():
             row = list_widget.currentRow()
@@ -2211,14 +2318,13 @@ class ECUFlashWindow(QMainWindow):
         dialog = QDialog(self)
         dialog.setWindowTitle("学习资料")
         apply_logo_to_window(dialog)
-        dialog.resize(900, 620)
+        dialog.resize(960, 720)
         dialog.setStyleSheet(
             "QDialog{background:#060B16;} QLabel{color:#E5E7EB;} "
             "QPushButton{background:#2563EB;color:white;border:none;border-radius:8px;padding:10px 18px;font-size:14px;font-weight:bold;} "
             "QLineEdit{background:rgba(3,10,28,0.96);color:#E5E7EB;border:1px solid rgba(96,165,250,0.35);border-radius:8px;padding:12px 14px;font-size:18px;} "
             "QListWidget{background:rgba(8,24,64,0.94);color:#E5E7EB;border:1px solid rgba(76,133,231,0.40);border-radius:12px;font-size:15px;} "
-            "QListWidget::item{padding:12px 14px;} QListWidget::item:selected{background:#1D4ED8;} "
-            "QTextBrowser{background:rgba(8,24,64,0.94);color:#E5E7EB;border:1px solid rgba(76,133,231,0.40);border-radius:12px;padding:16px;font-size:14px;}"
+            "QListWidget::item{padding:10px 12px;} QListWidget::item:selected{background:#1D4ED8;}"
         )
         layout = QVBoxLayout(dialog)
         layout.setContentsMargins(24, 24, 24, 24)
@@ -2236,37 +2342,11 @@ class ECUFlashWindow(QMainWindow):
         result_label.setStyleSheet("font-size:14px;color:#60A5FA;")
         layout.addWidget(result_label)
 
-        body_layout = QHBoxLayout()
-        body_layout.setSpacing(14)
-
         list_widget = QListWidget(dialog)
-        list_widget.setMinimumWidth(320)
-        body_layout.addWidget(list_widget, 4)
-
-        detail_view = QTextBrowser(dialog)
-        detail_view.setOpenExternalLinks(True)
-        detail_view.setHtml("<div style='color:#93C5FD;font-size:16px;'>请选择左侧学习资料</div>")
-        body_layout.addWidget(detail_view, 6)
-
-        layout.addLayout(body_layout)
+        list_widget.setIconSize(QSize(scaled_px(96), scaled_px(72)))
+        layout.addWidget(list_widget)
 
         selected_items = []
-
-        def build_html(item):
-            title_text = item.get("title") or "未命名学习资料"
-            summary = item.get("summary") or ""
-            content_html = item.get("content_html") or ""
-            cover = (item.get("cover_image_url") or "").strip()
-            cover_html = ""
-            if cover:
-                resolved = _resolve_resource_url(cover)
-                cover_html = f"<div style='margin-bottom:16px;'><img src='{resolved}' style='max-width:100%;border-radius:12px;'></div>"
-            return (
-                f"<h2 style='color:#EAF4FF;margin:0 0 12px 0;'>{title_text}</h2>"
-                f"<div style='color:#94A3B8;font-size:14px;line-height:1.8;margin-bottom:14px;'>{summary}</div>"
-                f"{cover_html}"
-                f"<div style='color:#E5E7EB;font-size:14px;line-height:1.8;'>{content_html}</div>"
-            )
 
         def render_items():
             keyword = search_edit.text().strip().lower()
@@ -2277,37 +2357,110 @@ class ECUFlashWindow(QMainWindow):
                 if keyword and keyword not in title_text and keyword not in summary_text:
                     continue
                 result_items.append(item)
+
             selected_items[:] = result_items
             list_widget.clear()
             if keyword:
                 result_label.setText(f"当前搜索到 {len(result_items)} 条学习资料")
             else:
                 result_label.setText("请输入关键词后搜索")
-            for item in result_items:
-                list_widget.addItem(f"{item.get('title') or '-'}")
-            if result_items:
-                list_widget.setCurrentRow(0)
-                detail_view.setHtml(build_html(result_items[0]))
-            else:
-                detail_view.setHtml("<div style='color:#93C5FD;font-size:16px;'>未找到匹配的学习资料</div>")
 
-        def show_selected_detail():
+            for item in result_items:
+                title_text = item.get("title") or "未命名学习资料"
+                summary_text = item.get("summary") or "暂无摘要"
+                summary_text = re.sub(r"\s+", " ", str(summary_text)).strip()
+                if len(summary_text) > 36:
+                    summary_text = summary_text[:36] + "..."
+                list_item = QListWidgetItem(f"{title_text}\n{summary_text}")
+                cover_pixmap = self._load_remote_pixmap(item.get("cover_image_url"))
+                if cover_pixmap and not cover_pixmap.isNull():
+                    list_item.setIcon(QIcon(cover_pixmap.scaled(96, 72, Qt.KeepAspectRatioByExpanding, Qt.SmoothTransformation)))
+                list_widget.addItem(list_item)
+
+        def open_selected_article():
             row = list_widget.currentRow()
             if row < 0 or row >= len(selected_items):
-                detail_view.setHtml("<div style='color:#93C5FD;font-size:16px;'>请选择左侧学习资料</div>")
+                show_message(dialog, QMessageBox.Warning, "提示", "请先选择学习资料")
                 return
-            detail_view.setHtml(build_html(selected_items[row]))
+            self._show_learning_article_detail_dialog(selected_items[row])
 
         search_edit.textChanged.connect(lambda _=None: render_items())
-        list_widget.currentRowChanged.connect(lambda _=None: show_selected_detail())
+        list_widget.itemDoubleClicked.connect(lambda _: open_selected_article())
         render_items()
 
         btn_row = QHBoxLayout()
         btn_row.addStretch()
+        detail_btn = QPushButton("查看资料")
+        detail_btn.clicked.connect(open_selected_article)
         close_btn = QPushButton("关闭")
         close_btn.clicked.connect(dialog.accept)
+        btn_row.addWidget(detail_btn)
         btn_row.addWidget(close_btn)
         layout.addLayout(btn_row)
+        dialog.exec_()
+
+    def _show_learning_article_detail_dialog(self, item):
+        dialog = QDialog(self)
+        dialog.setWindowTitle(item.get("title") or "学习资料")
+        apply_logo_to_window(dialog)
+        dialog.resize(980, 760)
+        dialog.setStyleSheet(
+            "QDialog{background:#060B16;} QLabel{color:#E5E7EB;} "
+            "QPushButton{background:#2563EB;color:white;border:none;border-radius:8px;padding:10px 18px;font-size:14px;font-weight:bold;} "
+            "QFrame{background:rgba(8,24,64,0.94);border:1px solid rgba(76,133,231,0.40);border-radius:14px;}"
+        )
+        layout = QVBoxLayout(dialog)
+        layout.setContentsMargins(20, 20, 20, 20)
+        layout.setSpacing(14)
+
+        title_text = item.get("title") or "未命名学习资料"
+        title_label = QLabel(title_text)
+        title_label.setStyleSheet("font-size:22px;font-weight:bold;color:#93C5FD;")
+        layout.addWidget(title_label)
+
+        subtitle = QLabel(item.get("summary") or "暂无摘要")
+        subtitle.setWordWrap(True)
+        subtitle.setStyleSheet("font-size:13px;color:#94A3B8;")
+        layout.addWidget(subtitle)
+
+        content_frame = QFrame()
+        content_layout = QVBoxLayout(content_frame)
+        content_layout.setContentsMargins(16, 16, 16, 16)
+        content_layout.setSpacing(12)
+
+        info_title = QLabel("图文内容")
+        info_title.setStyleSheet("font-size:16px;font-weight:bold;color:#CFE4FF;")
+        content_layout.addWidget(info_title)
+
+        article_html = _normalize_learning_article_html(item.get('content_html') or '')
+
+        content_view = QTextBrowser()
+        content_view.setOpenExternalLinks(True)
+        content_view.setOpenLinks(True)
+        content_view.setStyleSheet("background:rgba(3,10,28,0.96);color:#E5E7EB;border:none;font-size:14px;padding:8px;")
+        content_view.document().setDefaultStyleSheet(
+            "html,body{background:transparent;color:#E5E7EB;}"
+            "p,div,span,li,td,th{background:transparent;color:#E5E7EB;line-height:1.9;}"
+            "h1,h2,h3,h4,h5,h6{background:transparent;color:#CFE4FF;margin:18px 0 10px 0;}"
+            "a{color:#7DD3FC;}"
+            "table{width:100%;background:transparent;border-collapse:collapse;color:#E5E7EB;margin:12px 0;}"
+            "td,th{border:1px solid rgba(148,163,184,0.35);padding:8px;}"
+            "img{display:block;background:transparent;border-radius:12px;max-width:260px;max-height:360px;width:auto;height:auto;margin:10px auto;}"
+            "ul,ol{margin:8px 0 8px 20px;}"
+            "blockquote{border-left:3px solid rgba(125,211,252,0.55);padding-left:12px;color:#CBD5E1;}"
+        )
+        content_view.setHtml(
+            "<html><body style='background:transparent;color:#E5E7EB;'>"
+            f"<div style='color:#E5E7EB;font-size:14px;line-height:1.9;'>{article_html or '<p>暂无图文内容</p>'}</div>"
+            "</body></html>"
+        )
+        content_layout.addWidget(content_view, 1)
+
+        layout.addWidget(content_frame, 1)
+
+        close_btn = QPushButton("关闭")
+        close_btn.clicked.connect(dialog.accept)
+        layout.addWidget(close_btn, 0, Qt.AlignRight)
         dialog.exec_()
 
     def open_wiring_guide_dialog(self):
@@ -2731,9 +2884,9 @@ class ECUFlashWindow(QMainWindow):
         button.setCursor(Qt.PointingHandCursor if not placeholder else Qt.ArrowCursor)
         button.setEnabled(True)
         button.setProperty("cardAllowed", bool(is_allowed))
-        button.setFixedSize(scaled_px(232), scaled_px(182))
+        button.setFixedSize(scaled_px(258), scaled_px(182))
         button.setSizePolicy(QSizePolicy.Fixed, QSizePolicy.Fixed)
-        button.setIcon(_get_function_icon(title, 104))
+        button.setIcon(_get_function_icon(title, 104, muted=(not is_allowed and not placeholder)))
         button.setIconSize(QSize(scaled_px(104), scaled_px(104)))
         button.setToolButtonStyle(Qt.ToolButtonTextUnderIcon)
         button.setStyleSheet("""
@@ -2766,7 +2919,7 @@ class ECUFlashWindow(QMainWindow):
             }
         """)
         if not is_allowed and not placeholder:
-            button.setStyleSheet(button.styleSheet() + "QToolButton{color:rgba(214,228,255,0.78);background:qlineargradient(x1:0,y1:0,x2:1,y2:1,stop:0 rgba(24,50,92,0.96),stop:0.55 rgba(28,60,108,0.94),stop:1 rgba(17,34,70,0.96));border:1px solid rgba(120,144,179,0.26);} QToolButton:hover:enabled{background:qlineargradient(x1:0,y1:0,x2:1,y2:1,stop:0 rgba(30,63,118,0.96),stop:0.55 rgba(35,75,138,0.94),stop:1 rgba(21,42,84,0.96));border:1px solid rgba(245,158,11,0.42);}")
+            button.setStyleSheet(button.styleSheet() + "QToolButton{color:rgba(190,198,210,0.92);background:qlineargradient(x1:0,y1:0,x2:1,y2:1,stop:0 rgba(43,50,63,0.98),stop:0.55 rgba(64,73,88,0.96),stop:1 rgba(34,40,52,0.98));border:1px solid rgba(148,163,184,0.28);} QToolButton:hover:enabled{background:qlineargradient(x1:0,y1:0,x2:1,y2:1,stop:0 rgba(55,64,80,0.98),stop:0.55 rgba(76,87,105,0.96),stop:1 rgba(45,52,66,0.98));border:1px solid rgba(168,180,197,0.38);}")
         if not placeholder:
             effect = QGraphicsDropShadowEffect(button)
             effect.setBlurRadius(24)
@@ -2783,7 +2936,7 @@ class ECUFlashWindow(QMainWindow):
         row_widget = QWidget()
         row_layout = QHBoxLayout(row_widget)
         row_layout.setContentsMargins(0, 0, 0, 0)
-        row_layout.setSpacing(scaled_px(10))
+        row_layout.setSpacing(scaled_px(18))
         row_layout.setAlignment(Qt.AlignLeft)
         for card in cards:
             row_layout.addWidget(card, 0, Qt.AlignLeft)
@@ -2804,15 +2957,23 @@ class ECUFlashWindow(QMainWindow):
         self.clear_function_buttons()
         self.func_tip_label.hide()
 
-        if not functions or len(functions) == 0:
-            self.show_default_step3_button()
-            return
-
         self.func_scroll.verticalScrollBar().setValue(0)
         cards = self._append_builtin_cards()
 
-        for func_name, func_info in functions.items():
-            runtime_func_info = dict(func_info or {})
+        runtime_functions = functions if isinstance(functions, dict) else {}
+        all_function_names = list(ALL_FUNCTION_NAMES or [])
+
+        if not all_function_names:
+            all_function_names = _collect_all_function_names(ECU_DATABASE)
+
+        if not all_function_names:
+            if not runtime_functions:
+                self.show_default_step3_button()
+                return
+            all_function_names = list(runtime_functions.keys())
+
+        for func_name in all_function_names:
+            runtime_func_info = dict(runtime_functions.get(func_name) or {})
             runtime_func_info.setdefault("name", func_name)
             is_allowed = self.is_function_allowed(runtime_func_info)
             cards.append(
@@ -3069,7 +3230,7 @@ class MergedMainWindow(ECUFlashWindow):
         dialog = QDialog(self)
         dialog.setWindowTitle(title)
         apply_logo_to_window(dialog)
-        dialog.setFixedSize(520, 620)
+        dialog.setFixedSize(560, 760)
         dialog.setStyleSheet(
             "QDialog{background:#0F172A;} QLabel{color:#E5E7EB;} QPushButton{background:#2563EB;color:white;border:none;border-radius:8px;padding:10px 18px;font-size:14px;font-weight:bold;}"
         )
@@ -3094,6 +3255,8 @@ class MergedMainWindow(ECUFlashWindow):
         if qr_code_url:
             qr_label = QLabel()
             qr_label.setAlignment(Qt.AlignCenter)
+            qr_label.setMinimumSize(420, 420)
+            qr_label.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
             resolved_qr_code_url = _resolve_resource_url(qr_code_url)
             try:
                 request = urllib.request.Request(resolved_qr_code_url, headers={"Accept": "image/*"})
@@ -3101,13 +3264,13 @@ class MergedMainWindow(ECUFlashWindow):
                     data = response.read()
                 pixmap = QPixmap()
                 if pixmap.loadFromData(data):
-                    qr_label.setPixmap(pixmap.scaled(260, 260, Qt.KeepAspectRatio, Qt.SmoothTransformation))
+                    qr_label.setPixmap(pixmap.scaled(420, 420, Qt.KeepAspectRatio, Qt.SmoothTransformation))
                 else:
                     qr_label.setText(f"收款码：{resolved_qr_code_url}")
             except Exception:
                 qr_label.setText(f"收款码：{resolved_qr_code_url}")
-            qr_label.setStyleSheet("background:#FFFFFF;border-radius:16px;padding:16px;color:#111827;")
-            layout.addWidget(qr_label)
+            qr_label.setStyleSheet("background:#FFFFFF;border-radius:16px;padding:20px;color:#111827;")
+            layout.addWidget(qr_label, 0, Qt.AlignCenter)
 
         layout.addStretch()
         close_btn = QPushButton("我知道了")

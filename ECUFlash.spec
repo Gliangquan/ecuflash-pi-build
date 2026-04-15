@@ -11,6 +11,12 @@ if icon_dir.exists():
 if Path('icon.jpg').exists():
     icon_datas.append(('icon.jpg', '.'))
 
+app_icon = None
+if Path('icon.icns').exists():
+    app_icon = 'icon.icns'
+elif Path('icon.ico').exists():
+    app_icon = 'icon.ico'
+
 
 a = Analysis(
     ['frontend.py'],
@@ -56,6 +62,6 @@ coll = COLLECT(
 app = BUNDLE(
     coll,
     name='ECUFlash.app',
-    icon=None,
+    icon=app_icon,
     bundle_identifier=None,
 )
