@@ -68,3 +68,41 @@ jobs:
         with:
           name: ${{ matrix.artifact_name }}
           path: ${{ matrix.output_file }}
+
+  release:
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Download Windows artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: ECUFlash-windows
+          path: release-assets
+
+      - name: Download macOS artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: ECUFlash-macos
+          path: release-assets
+
+      - name: Download Linux artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: ECUFlash-linux
+          path: release-assets
+
+      - name: Publish latest release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: latest-build
+          name: 最新桌面版构建
+          prerelease: true
+          make_latest: true
+          overwrite_files: true
+          generate_release_notes: true
+          files: |
+            release-assets/ECUFlash-windows.zip
+            release-assets/ECUFlash-macos.zip
+            release-assets/ECUFlash-linux.tar.gz

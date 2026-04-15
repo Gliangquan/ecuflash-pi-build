@@ -1,5 +1,14 @@
 # ECUFlash 服务端接口
 
+## 最新下载
+- Release 页面：<https://github.com/Gliangquan/ecuflash-pi-build/releases>
+- 最新构建：<https://github.com/Gliangquan/ecuflash-pi-build/releases/tag/latest-build>
+- Windows：`ECUFlash-windows.zip`
+- macOS：`ECUFlash-macos.zip`
+- Linux：`ECUFlash-linux.tar.gz`
+
+> GitHub 首页用户可直接点右侧 Releases 或上面链接下载，不需要进 Packages。
+
 ## 1. 安装依赖
 ```bash
 cd /www/wwwroot/ecuflash/server
