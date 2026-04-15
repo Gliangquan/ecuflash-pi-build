@@ -48,7 +48,7 @@ def _resource_path(*parts):
     return os.path.join(base_dir, *parts)
 
 
-API_BASE_URL = os.environ.get("ECUFLASH_API_BASE_URL", "http://107.148.176.142/api/v1").rstrip("/")
+API_BASE_URL = os.environ.get("ECUFLASH_API_BASE_URL", "http://107.148.176.142:8000/api/v1").rstrip("/")
 APP_VERSION = "1.0.0"
 APP_LOGO_FILE = "icon.jpg"
 APP_LOGO_URL = ""
