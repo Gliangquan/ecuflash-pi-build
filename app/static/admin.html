@@ -1,0 +1,1350 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>ECU 功能授权运营台</title>
+  <link rel="stylesheet" href="/static/vendor/arco.css" />
+  <style>
+    :root {
+      --bg-page: #f7f8fa;
+      --bg-card: #ffffff;
+      --border: #e5e7eb;
+      --text-primary: #111827;
+      --text-secondary: #4b5563;
+      --brand: #5468ff;
+      --brand-soft: #eef1ff;
+      --success: #12b76a;
+      --warning: #f79009;
+      --danger: #f04438;
+    }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      font-family: Inter, -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC", "Microsoft YaHei", sans-serif;
+      background: var(--bg-page);
+      color: var(--text-primary);
+    }
+    #app { min-height: 100vh; }
+    .shell { display: grid; grid-template-columns: 248px 1fr; min-height: 100vh; }
+    .sidebar {
+      background: #fff;
+      border-right: 1px solid var(--border);
+      padding: 20px 16px;
+    }
+    .brand {
+      font-size: 18px;
+      font-weight: 700;
+      padding: 8px 12px 20px;
+    }
+    .nav-item {
+      padding: 10px 12px;
+      border-radius: 10px;
+      margin-bottom: 6px;
+      cursor: pointer;
+      color: var(--text-secondary);
+    }
+    .nav-item.active { background: var(--brand-soft); color: var(--brand); font-weight: 600; }
+    .main { padding: 24px; }
+    .topbar {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      margin-bottom: 20px;
+    }
+    .page-title { font-size: 24px; font-weight: 700; }
+    .page-subtitle { margin-top: 6px; color: var(--text-secondary); font-size: 13px; }
+    .stats { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 16px; margin-bottom: 20px; }
+    .content-grid { display: grid; gap: 16px; }
+    .two-col { grid-template-columns: 1.1fr 1fr; }
+    .three-col { grid-template-columns: 280px 1fr 340px; align-items: start; }
+    .panel {
+      background: var(--bg-card);
+      border: 1px solid var(--border);
+      border-radius: 16px;
+      padding: 18px;
+    }
+    .panel-title { font-size: 16px; font-weight: 600; margin-bottom: 14px; }
+    .stat-value { font-size: 28px; font-weight: 700; margin: 10px 0 6px; }
+    .muted { color: var(--text-secondary); font-size: 13px; }
+    .user-list { display: grid; gap: 10px; max-height: 620px; overflow: auto; }
+    .user-card {
+      border: 1px solid var(--border);
+      border-radius: 12px;
+      padding: 12px;
+      cursor: pointer;
+      background: #fff;
+    }
+    .user-card.active { border-color: var(--brand); background: var(--brand-soft); }
+    .user-name { font-weight: 600; }
+    .meta-row { display: flex; gap: 8px; align-items: center; margin-top: 6px; flex-wrap: wrap; }
+    .toolbar { display: flex; gap: 12px; align-items: center; margin-bottom: 14px; }
+    .tree-scroll { max-height: 620px; overflow: auto; border: 1px solid var(--border); border-radius: 12px; padding: 12px; }
+    .section-row { display: flex; justify-content: space-between; align-items: center; margin-bottom: 10px; }
+    .footer-actions { display: flex; gap: 10px; margin-top: 18px; }
+    .table-like { display: grid; gap: 10px; }
+    .list-line { display: flex; justify-content: space-between; gap: 12px; padding: 10px 0; border-bottom: 1px solid #f0f2f5; }
+    .list-line:last-child { border-bottom: none; }
+    .chip-wrap { display: flex; gap: 8px; flex-wrap: wrap; }
+    .asset-grid {
+      display: grid;
+      grid-template-columns: repeat(auto-fill, minmax(260px, 1fr));
+      gap: 16px;
+    }
+    .asset-card {
+      border: 1px solid var(--border);
+      border-radius: 16px;
+      overflow: hidden;
+      background: #fff;
+    }
+    .asset-cover {
+      height: 156px;
+      background: #f3f4f6;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      overflow: hidden;
+    }
+    .asset-cover img {
+      width: 100%;
+      height: 100%;
+      object-fit: cover;
+      display: block;
+    }
+    .asset-placeholder {
+      color: var(--text-secondary);
+      font-size: 13px;
+    }
+    .asset-body {
+      padding: 14px;
+      display: grid;
+      gap: 10px;
+    }
+    .asset-title-row {
+      display: flex;
+      justify-content: space-between;
+      gap: 12px;
+      align-items: flex-start;
+    }
+    .asset-title {
+      font-size: 15px;
+      font-weight: 600;
+      line-height: 1.5;
+    }
+    .asset-summary {
+      color: var(--text-secondary);
+      font-size: 13px;
+      line-height: 1.6;
+      min-height: 42px;
+    }
+    .asset-meta {
+      display: grid;
+      gap: 4px;
+      color: var(--text-secondary);
+      font-size: 12px;
+    }
+    .asset-actions {
+      display: flex;
+      gap: 8px;
+      flex-wrap: wrap;
+    }
+    .preview-box {
+      width: 180px;
+      height: 180px;
+      border-radius: 18px;
+      background: #f3f4f6;
+      border: 1px dashed var(--border);
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      overflow: hidden;
+    }
+    .preview-box img {
+      width: 100%;
+      height: 100%;
+      object-fit: cover;
+      display: block;
+    }
+    .preview-hint {
+      color: var(--text-secondary);
+      font-size: 13px;
+      text-align: center;
+      padding: 0 16px;
+      line-height: 1.6;
+    }
+    @media (max-width: 1280px) {
+      .stats { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+      .three-col { grid-template-columns: 1fr; }
+      .shell { grid-template-columns: 1fr; }
+      .sidebar { display: none; }
+    }
+  </style>
+</head>
+<body>
+  <div id="app"></div>
+  <script src="/static/vendor/vue.global.prod.js"></script>
+  <script src="/static/vendor/arco-vue.min.js"></script>
+  <script>
+    const { createApp, ref, reactive, computed, onMounted } = Vue;
+    const { Message } = ArcoVue;
+
+    createApp({
+      setup() {
+        const token = ref(localStorage.getItem('admin_token') || '');
+        const currentUser = ref(null);
+        const activeMenu = ref('dashboard');
+        const loading = ref(false);
+        const dashboard = reactive({ summary: {}, recent_users: [], recent_logs: [] });
+        const users = ref([]);
+        const logs = ref([]);
+        const permissionTree = ref([]);
+        const permissionSearch = ref('');
+        const selectedUser = ref(null);
+        const selectedFunctionIds = ref([]);
+        const permissionEndAt = ref('');
+        const loginForm = reactive({ phone: 'admin', password: 'admin1234' });
+        const createForm = reactive({ phone: '', name: '', password: '', status: 'enabled' });
+        const resetPasswordForm = reactive({ password: '' });
+        const purchaseForm = reactive({ title: '', message: '', qr_code_url: '', payment_qr_preview: '', contact: '', update_notice: '', force_update: '0', latest_version: '', latest_download_url: '', allow_passwordless_register: '0', registration_requires_approval: '1', virtual_downloads_json: '[]', wiring_guides_json: '[]' });
+        const virtualAssets = ref([]);
+        const assetVisible = ref(false);
+        const assetSubmitting = ref(false);
+        const assetForm = reactive({ id: '', title: '', category: 'manual', summary: '', keywords: '', image_url: '', download_text: '立即查看', sort_order: 0, is_enabled: 1, file_name: '', object_key: '', file_url: '', content_type: '', file_size: 0 });
+        const wiringGuides = ref([]);
+        const wiringGuideSearch = ref('');
+        const wiringGuideVisible = ref(false);
+        const wiringGuideSubmitting = ref(false);
+        const wiringGuideForm = reactive({ id: null, name: '', model: '', car_model: '', keywords: '', description: '', preview_image_url: '', file_name: '', object_key: '', file_url: '', content_type: '', file_size: 0, sort_order: 0, is_enabled: 1 });
+        const createVisible = ref(false);
+        const resetPasswordVisible = ref(false);
+        const resetPasswordUser = ref(null);
+
+        const headers = computed(() => token.value ? { Authorization: 'Bearer ' + token.value } : {});
+
+        const navItems = [
+          { key: 'dashboard', label: '仪表盘' },
+          { key: 'users', label: '用户管理' },
+          { key: 'permissions', label: '权限授权' },
+          { key: 'purchase', label: '开通配置' },
+          { key: 'wiring-guides', label: '接线图管理' },
+          { key: 'logs', label: '操作日志' },
+        ];
+
+        async function request(path, options = {}) {
+          const mergedHeaders = {
+            ...headers.value,
+            ...(options.headers || {}),
+          };
+          if (options.body instanceof FormData) {
+            delete mergedHeaders['Content-Type'];
+          } else {
+            mergedHeaders['Content-Type'] = 'application/json';
+          }
+          const resp = await fetch(path, {
+            ...options,
+            headers: mergedHeaders,
+          });
+          if (!resp.ok) {
+            let message = '请求失败';
+            try {
+              const data = await resp.json();
+              message = data.detail || JSON.stringify(data);
+            } catch (e) {}
+            throw new Error(message);
+          }
+          return resp.json();
+        }
+
+        async function login() {
+          loading.value = true;
+          try {
+            const data = await request('/api/v1/auth/login', {
+              method: 'POST',
+              body: JSON.stringify({
+                ...loginForm,
+                device_id: 'admin-web-console',
+                device_name: 'Admin Web Console',
+              }),
+            });
+            token.value = data.token;
+            localStorage.setItem('admin_token', data.token);
+            currentUser.value = data.user;
+            Message.success('登录成功');
+            await loadAll();
+          } catch (err) {
+            Message.error(err.message);
+          } finally {
+            loading.value = false;
+          }
+        }
+
+        async function loadMe() {
+          currentUser.value = await request('/api/v1/auth/me');
+        }
+
+        async function loadDashboard() {
+          const data = await request('/api/v1/admin/dashboard');
+          Object.assign(dashboard, data);
+        }
+
+        async function loadUsers() {
+          const data = await request('/api/v1/admin/users');
+          users.value = data.items;
+          if (!selectedUser.value && users.value.length) {
+            selectedUser.value = users.value[0];
+          } else if (selectedUser.value) {
+            const next = users.value.find(item => item.id === selectedUser.value.id);
+            if (next) selectedUser.value = next;
+          }
+        }
+
+        async function loadPermissionTree() {
+          const data = await request('/api/v1/admin/permission-tree');
+          permissionTree.value = data.items;
+        }
+
+        async function loadLogs() {
+          const data = await request('/api/v1/admin/logs');
+          logs.value = data.items;
+        }
+
+        async function loadPurchaseConfig() {
+          const data = await request('/api/v1/admin/purchase-config');
+          purchaseForm.title = data.title || '';
+          purchaseForm.message = data.message || '';
+          purchaseForm.qr_code_url = data.qr_code_url || '';
+          purchaseForm.payment_qr_preview = data.payment_qr_preview || data.qr_code_url || '';
+          purchaseForm.contact = data.contact || '';
+          purchaseForm.update_notice = data.update_notice || '';
+          purchaseForm.force_update = String(data.force_update || '0');
+          purchaseForm.latest_version = data.latest_version || '';
+          purchaseForm.latest_download_url = data.latest_download_url || '';
+          purchaseForm.allow_passwordless_register = String(data.allow_passwordless_register || '0');
+          purchaseForm.registration_requires_approval = String(data.registration_requires_approval || '1');
+          purchaseForm.virtual_downloads_json = data.virtual_downloads_json || '[]';
+          purchaseForm.wiring_guides_json = data.wiring_guides_json || '[]';
+          virtualAssets.value = Array.isArray(data.virtual_assets) ? data.virtual_assets : [];
+        }
+
+        async function loadWiringGuides() {
+          const keyword = wiringGuideSearch.value ? ('?keyword=' + encodeURIComponent(wiringGuideSearch.value)) : '';
+          const data = await request('/api/v1/admin/wiring-guides' + keyword);
+          wiringGuides.value = data.items || [];
+        }
+
+        async function loadUserPermissions() {
+          if (!selectedUser.value) return;
+          const data = await request(`/api/v1/admin/users/${selectedUser.value.id}/permissions`);
+          selectedFunctionIds.value = data.items.filter(item => item.status === 'enabled').map(item => item.function_id);
+          const firstWithEnd = data.items.find(item => item.end_at);
+          permissionEndAt.value = firstWithEnd && firstWithEnd.end_at ? String(firstWithEnd.end_at).replace('T', ' ').slice(0, 19) : '';
+        }
+
+        async function loadAll() {
+          await loadMe();
+          await Promise.all([loadDashboard(), loadUsers(), loadPermissionTree(), loadLogs(), loadPurchaseConfig(), loadWiringGuides()]);
+          await loadUserPermissions();
+        }
+
+        async function createUser() {
+          try {
+            await request('/api/v1/admin/users', {
+              method: 'POST',
+              body: JSON.stringify(createForm),
+            });
+            Message.success('用户已创建');
+            createVisible.value = false;
+            createForm.phone = '';
+            createForm.name = '';
+            createForm.password = '';
+            createForm.status = 'enabled';
+            await loadUsers();
+            await loadDashboard();
+          } catch (err) {
+            Message.error(err.message);
+          }
+        }
+
+        async function toggleUser(user) {
+          try {
+            await request(`/api/v1/admin/users/${user.id}/toggle`, { method: 'POST' });
+            Message.success('状态已更新');
+            await loadUsers();
+            await loadDashboard();
+          } catch (err) {
+            Message.error(err.message);
+          }
+        }
+
+        async function approveUser(user) {
+          try {
+            await request(`/api/v1/admin/users/${user.id}/approve`, { method: 'POST' });
+            Message.success('用户已审批通过');
+            await Promise.all([loadUsers(), loadDashboard(), loadLogs()]);
+          } catch (err) {
+            Message.error(err.message);
+          }
+        }
+
+        async function rejectUser(user) {
+          try {
+            await request(`/api/v1/admin/users/${user.id}/reject`, {
+              method: 'POST',
+              body: JSON.stringify({ reason: '资料未通过审核' }),
+            });
+            Message.success('用户已驳回');
+            await Promise.all([loadUsers(), loadDashboard(), loadLogs()]);
+          } catch (err) {
+            Message.error(err.message);
+          }
+        }
+
+        async function unbindUserDevice(user) {
+          try {
+            await request(`/api/v1/admin/users/${user.id}/unbind-device`, { method: 'POST' });
+            Message.success('设备已解绑');
+            await Promise.all([loadUsers(), loadDashboard(), loadLogs()]);
+          } catch (err) {
+            Message.error(err.message);
+          }
+        }
+
+        async function deleteUser(user) {
+          try {
+            await request(`/api/v1/admin/users/${user.id}`, { method: 'DELETE' });
+            Message.success('用户已删除');
+            await Promise.all([loadUsers(), loadDashboard(), loadLogs()]);
+          } catch (err) {
+            Message.error(err.message);
+          }
+        }
+
+        async function savePermissions() {
+          if (!selectedUser.value) return;
+          try {
+            await request('/api/v1/admin/permissions', {
+              method: 'POST',
+              body: JSON.stringify({
+                user_id: selectedUser.value.id,
+                function_ids: selectedFunctionIds.value,
+                end_at: permissionEndAt.value || null,
+              }),
+            });
+            Message.success('权限已保存');
+            await loadUsers();
+            await loadDashboard();
+            await loadLogs();
+          } catch (err) {
+            Message.error(err.message);
+          }
+        }
+
+        function openResetPassword(user) {
+          resetPasswordUser.value = user;
+          resetPasswordForm.password = '';
+          resetPasswordVisible.value = true;
+        }
+
+        async function resetPassword() {
+          if (!resetPasswordUser.value) return;
+          try {
+            await request(`/api/v1/admin/users/${resetPasswordUser.value.id}/reset-password`, {
+              method: 'POST',
+              body: JSON.stringify({
+                password: resetPasswordForm.password,
+              }),
+            });
+            Message.success('密码已重置');
+            resetPasswordVisible.value = false;
+            resetPasswordForm.password = '';
+            resetPasswordUser.value = null;
+            await loadLogs();
+          } catch (err) {
+            Message.error(err.message);
+          }
+        }
+
+        function validateJsonArray(text, label) {
+          let data;
+          try {
+            data = JSON.parse(text || '[]');
+          } catch (err) {
+            throw new Error(label + ' 数据格式不正确');
+          }
+          if (!Array.isArray(data)) {
+            throw new Error(label + ' 必须是列表');
+          }
+          for (const item of data) {
+            if (typeof item !== 'object' || item === null) {
+              throw new Error(label + ' 每一项都必须是对象');
+            }
+          }
+          return data;
+        }
+
+        function syncVirtualAssetsJson() {
+          purchaseForm.virtual_downloads_json = JSON.stringify(virtualAssets.value.map(item => ({
+            id: item.id || '',
+            title: item.title || item.name || '',
+            category: item.category || 'manual',
+            summary: item.summary || item.description || '',
+            image_url: item.image_url || '',
+            keywords: item.keywords || '',
+            download_text: item.download_text || item.button_text || '立即查看',
+            sort_order: Number(item.sort_order || 0),
+            is_enabled: item.is_enabled ? 1 : 0,
+            file_name: item.file_name || '',
+            object_key: item.object_key || '',
+            file_url: item.file_url || item.url || '',
+            content_type: item.content_type || '',
+            file_size: Number(item.file_size || 0),
+          })), null, 2);
+        }
+
+        function resetAssetForm() {
+          assetForm.id = '';
+          assetForm.title = '';
+          assetForm.category = 'manual';
+          assetForm.summary = '';
+          assetForm.keywords = '';
+          assetForm.image_url = '';
+          assetForm.download_text = '立即查看';
+          assetForm.sort_order = 0;
+          assetForm.is_enabled = 1;
+          assetForm.file_name = '';
+          assetForm.object_key = '';
+          assetForm.file_url = '';
+          assetForm.content_type = '';
+          assetForm.file_size = 0;
+        }
+
+        function openCreateAsset() {
+          resetAssetForm();
+          assetVisible.value = true;
+        }
+
+        function openEditAsset(item) {
+          assetForm.id = item.id || '';
+          assetForm.title = item.title || item.name || '';
+          assetForm.category = item.category || 'manual';
+          assetForm.summary = item.summary || item.description || '';
+          assetForm.keywords = item.keywords || '';
+          assetForm.image_url = item.image_url || '';
+          assetForm.download_text = item.download_text || item.button_text || '立即查看';
+          assetForm.sort_order = Number(item.sort_order || 0);
+          assetForm.is_enabled = item.is_enabled ? 1 : 0;
+          assetForm.file_name = item.file_name || '';
+          assetForm.object_key = item.object_key || '';
+          assetForm.file_url = item.file_url || item.url || '';
+          assetForm.content_type = item.content_type || '';
+          assetForm.file_size = Number(item.file_size || 0);
+          assetVisible.value = true;
+        }
+
+        function deleteAsset(item) {
+          virtualAssets.value = virtualAssets.value.filter(row => String(row.id || row.title || row.file_url) !== String(item.id || item.title || item.file_url));
+          syncVirtualAssetsJson();
+          Message.success('资料已移除，保存后生效');
+        }
+
+        function resetWiringGuideForm() {
+          wiringGuideForm.id = null;
+          wiringGuideForm.name = '';
+          wiringGuideForm.model = '';
+          wiringGuideForm.car_model = '';
+          wiringGuideForm.keywords = '';
+          wiringGuideForm.description = '';
+          wiringGuideForm.preview_image_url = '';
+          wiringGuideForm.file_name = '';
+          wiringGuideForm.object_key = '';
+          wiringGuideForm.file_url = '';
+          wiringGuideForm.content_type = '';
+          wiringGuideForm.file_size = 0;
+          wiringGuideForm.sort_order = 0;
+          wiringGuideForm.is_enabled = 1;
+        }
+
+        function openCreateWiringGuide() {
+          resetWiringGuideForm();
+          wiringGuideVisible.value = true;
+        }
+
+        function openEditWiringGuide(item) {
+          wiringGuideForm.id = item.id;
+          wiringGuideForm.name = item.name || '';
+          wiringGuideForm.model = item.model || '';
+          wiringGuideForm.car_model = item.car_model || '';
+          wiringGuideForm.keywords = item.keywords || '';
+          wiringGuideForm.description = item.description || '';
+          wiringGuideForm.preview_image_url = item.preview_image_url || item.image_url || '';
+          wiringGuideForm.file_name = item.file_name || '';
+          wiringGuideForm.object_key = item.object_key || '';
+          wiringGuideForm.file_url = item.file_url || item.download_url || '';
+          wiringGuideForm.content_type = item.content_type || '';
+          wiringGuideForm.file_size = Number(item.file_size || 0);
+          wiringGuideForm.sort_order = Number(item.sort_order || 0);
+          wiringGuideForm.is_enabled = item.is_enabled ? 1 : 0;
+          wiringGuideVisible.value = true;
+        }
+
+        async function uploadManagedFile(option, target) {
+          const formData = new FormData();
+          formData.append('file', option.fileItem.file);
+          try {
+            const resp = await fetch('/api/v1/admin/files/upload', {
+              method: 'POST',
+              headers: { Authorization: headers.value.Authorization || '' },
+              body: formData,
+            });
+            const data = await resp.json();
+            if (!resp.ok) throw new Error(data.detail || '上传失败');
+            target.file_name = data.file_name || '';
+            target.object_key = data.object_key || '';
+            target.file_url = data.file_url || '';
+            target.content_type = data.content_type || '';
+            target.file_size = Number(data.file_size || 0);
+            if ('preview_image_url' in target && !target.preview_image_url) {
+              target.preview_image_url = data.preview_url || data.file_url || '';
+            }
+            if ('image_url' in target && !target.image_url) {
+              target.image_url = data.preview_url || data.file_url || '';
+            }
+            Message.success('文件上传成功');
+            option.onSuccess(data);
+          } catch (err) {
+            Message.error(err.message || '上传失败');
+            option.onError(err);
+          }
+        }
+
+        async function uploadWiringGuideFile(option) {
+          return uploadManagedFile(option, wiringGuideForm);
+        }
+
+        async function uploadAssetFile(option) {
+          return uploadManagedFile(option, assetForm);
+        }
+
+        async function uploadQrCode(option) {
+          const formData = new FormData();
+          formData.append('file', option.fileItem.file);
+          try {
+            const resp = await fetch('/api/v1/admin/files/upload', {
+              method: 'POST',
+              headers: { Authorization: headers.value.Authorization || '' },
+              body: formData,
+            });
+            const data = await resp.json();
+            if (!resp.ok) throw new Error(data.detail || '上传失败');
+            purchaseForm.qr_code_url = data.file_url || '';
+            purchaseForm.payment_qr_preview = data.preview_url || data.file_url || '';
+            Message.success('收款码已上传');
+            option.onSuccess(data);
+          } catch (err) {
+            Message.error(err.message || '上传失败');
+            option.onError(err);
+          }
+        }
+
+        async function saveWiringGuide() {
+          try {
+            if (!wiringGuideForm.name.trim()) throw new Error('请输入资源名称');
+            if (!wiringGuideForm.object_key && !wiringGuideForm.file_url) throw new Error('请先上传接线图文件');
+            wiringGuideSubmitting.value = true;
+            const payload = {
+              id: wiringGuideForm.id,
+              name: wiringGuideForm.name,
+              model: wiringGuideForm.model,
+              car_model: wiringGuideForm.car_model,
+              keywords: wiringGuideForm.keywords,
+              description: wiringGuideForm.description,
+              preview_image_url: wiringGuideForm.preview_image_url,
+              file_name: wiringGuideForm.file_name,
+              object_key: wiringGuideForm.object_key,
+              file_url: wiringGuideForm.file_url,
+              content_type: wiringGuideForm.content_type,
+              file_size: wiringGuideForm.file_size,
+              sort_order: wiringGuideForm.sort_order,
+              is_enabled: wiringGuideForm.is_enabled,
+            };
+            const path = wiringGuideForm.id ? `/api/v1/admin/wiring-guides/${wiringGuideForm.id}` : '/api/v1/admin/wiring-guides';
+            const method = wiringGuideForm.id ? 'PUT' : 'POST';
+            await request(path, { method, body: JSON.stringify(payload) });
+            Message.success(wiringGuideForm.id ? '接线图已更新' : '接线图已创建');
+            wiringGuideVisible.value = false;
+            await Promise.all([loadWiringGuides(), loadPurchaseConfig(), loadLogs()]);
+          } catch (err) {
+            Message.error(err.message);
+          } finally {
+            wiringGuideSubmitting.value = false;
+          }
+        }
+
+        async function deleteWiringGuide(item) {
+          try {
+            await request(`/api/v1/admin/wiring-guides/${item.id}`, { method: 'DELETE' });
+            Message.success('接线图已删除');
+            await Promise.all([loadWiringGuides(), loadPurchaseConfig(), loadLogs()]);
+          } catch (err) {
+            Message.error(err.message);
+          }
+        }
+
+        async function saveAsset() {
+          try {
+            if (!assetForm.title.trim()) throw new Error('请输入资料名称');
+            if (!assetForm.object_key && !assetForm.file_url) throw new Error('请先上传资料文件');
+            assetSubmitting.value = true;
+            const id = assetForm.id || `asset-${Date.now()}`;
+            const nextItem = {
+              id,
+              title: assetForm.title.trim(),
+              category: assetForm.category || 'manual',
+              summary: assetForm.summary || '',
+              keywords: assetForm.keywords || '',
+              image_url: assetForm.image_url || '',
+              download_text: assetForm.download_text || '立即查看',
+              sort_order: Number(assetForm.sort_order || 0),
+              is_enabled: assetForm.is_enabled ? 1 : 0,
+              file_name: assetForm.file_name || '',
+              object_key: assetForm.object_key || '',
+              file_url: assetForm.file_url || '',
+              content_type: assetForm.content_type || '',
+              file_size: Number(assetForm.file_size || 0),
+            };
+            const index = virtualAssets.value.findIndex(item => String(item.id) === String(id));
+            if (index >= 0) {
+              virtualAssets.value.splice(index, 1, nextItem);
+            } else {
+              virtualAssets.value.unshift(nextItem);
+            }
+            virtualAssets.value = [...virtualAssets.value].sort((a, b) => Number(a.sort_order || 0) - Number(b.sort_order || 0));
+            syncVirtualAssetsJson();
+            assetVisible.value = false;
+            Message.success('资料已保存，点击“保存配置”后正式生效');
+          } catch (err) {
+            Message.error(err.message);
+          } finally {
+            assetSubmitting.value = false;
+          }
+        }
+
+        async function savePurchaseConfig() {
+          try {
+            syncVirtualAssetsJson();
+            validateJsonArray(purchaseForm.virtual_downloads_json, '资料列表');
+            await request('/api/v1/admin/purchase-config', {
+              method: 'POST',
+              body: JSON.stringify(purchaseForm),
+            });
+            Message.success('开通配置已保存');
+            await Promise.all([loadPurchaseConfig(), loadLogs()]);
+          } catch (err) {
+            Message.error(err.message);
+          }
+        }
+
+        function openExternal(url) {
+          const target = (url || '').trim();
+          if (!target) {
+            Message.warning('暂无可预览内容');
+            return;
+          }
+          const link = document.createElement('a');
+          link.href = target;
+          link.target = '_blank';
+          link.rel = 'noopener noreferrer';
+          document.body.appendChild(link);
+          link.click();
+          document.body.removeChild(link);
+        }
+
+        function collectFunctions(nodes, keyword) {
+          const result = [];
+          const lower = keyword.trim().toLowerCase();
+          for (const car of nodes) {
+            for (const model of car.children || []) {
+              const funcs = (model.children || []).filter(item => !lower || item.label.toLowerCase().includes(lower) || model.label.toLowerCase().includes(lower) || car.label.toLowerCase().includes(lower));
+              if (funcs.length) {
+                result.push({ car: car.label, model: model.label, functions: funcs });
+              }
+            }
+          }
+          return result;
+        }
+
+        const filteredTree = computed(() => collectFunctions(permissionTree.value, permissionSearch.value));
+
+        onMounted(async () => {
+          if (token.value) {
+            try {
+              await loadAll();
+            } catch (err) {
+              localStorage.removeItem('admin_token');
+              token.value = '';
+            }
+          }
+        });
+
+        return {
+          token,
+          currentUser,
+          activeMenu,
+          dashboard,
+          users,
+          logs,
+          navItems,
+          loginForm,
+          loading,
+          createVisible,
+          createForm,
+          resetPasswordForm,
+          resetPasswordVisible,
+          resetPasswordUser,
+          purchaseForm,
+          virtualAssets,
+          assetVisible,
+          assetSubmitting,
+          assetForm,
+          selectedUser,
+          selectedFunctionIds,
+          permissionEndAt,
+          permissionSearch,
+          filteredTree,
+          login,
+          createUser,
+          toggleUser,
+          approveUser,
+          rejectUser,
+          unbindUserDevice,
+          deleteUser,
+          openResetPassword,
+          resetPassword,
+          savePurchaseConfig,
+          openExternal,
+          saveAsset,
+          openCreateAsset,
+          openEditAsset,
+          deleteAsset,
+          uploadAssetFile,
+          uploadQrCode,
+          savePermissions,
+          loadUserPermissions,
+          wiringGuides,
+          wiringGuideSearch,
+          wiringGuideVisible,
+          wiringGuideSubmitting,
+          wiringGuideForm,
+          loadWiringGuides,
+          openCreateWiringGuide,
+          openEditWiringGuide,
+          saveWiringGuide,
+          deleteWiringGuide,
+          uploadWiringGuideFile,
+        };
+      },
+      template: `
+        <div v-if="!token" style="min-height:100vh;display:flex;align-items:center;justify-content:center;padding:24px;">
+          <div class="panel" style="width:420px;padding:28px;">
+            <div class="page-title" style="font-size:28px;">ECU 功能授权运营台</div>
+            <div class="page-subtitle" style="margin-bottom:24px;">管理员登录后可管理用户、权限与日志</div>
+            <a-form layout="vertical">
+              <a-form-item field="phone" label="手机号/账号">
+                <a-input v-model="loginForm.phone" placeholder="请输入管理员账号" />
+              </a-form-item>
+              <a-form-item field="password" label="密码">
+                <a-input-password v-model="loginForm.password" placeholder="请输入密码" />
+              </a-form-item>
+              <a-button type="primary" long :loading="loading" @click="login">登录管理台</a-button>
+            </a-form>
+          </div>
+        </div>
+        <div v-else class="shell">
+          <aside class="sidebar">
+            <div class="brand">ECU 授权台</div>
+            <div v-for="item in navItems" :key="item.key" class="nav-item" :class="{ active: activeMenu === item.key }" @click="activeMenu = item.key">
+              {{ item.label }}
+            </div>
+          </aside>
+          <main class="main">
+            <div class="topbar">
+              <div>
+                <div class="page-title">{{ navItems.find(i => i.key === activeMenu)?.label || '管理台' }}</div>
+                <div class="page-subtitle">现代化 ECU 功能授权与用户运营管理页面</div>
+              </div>
+              <div class="muted">{{ currentUser?.name }}（{{ currentUser?.phone }}）</div>
+            </div>
+
+            <template v-if="activeMenu === 'dashboard'">
+              <div class="stats">
+                <div class="panel">
+                  <div class="muted">总用户数</div>
+                  <div class="stat-value">{{ dashboard.summary.total_users || 0 }}</div>
+                  <div class="muted">包含管理员与普通用户</div>
+                </div>
+                <div class="panel">
+                  <div class="muted">启用用户数</div>
+                  <div class="stat-value">{{ dashboard.summary.active_users || 0 }}</div>
+                  <div class="muted">当前可登录账号数量</div>
+                </div>
+                <div class="panel">
+                  <div class="muted">有效授权数</div>
+                  <div class="stat-value">{{ dashboard.summary.total_permissions || 0 }}</div>
+                  <div class="muted">已配置功能权限条目</div>
+                </div>
+                <div class="panel">
+                  <div class="muted">7天内到期</div>
+                  <div class="stat-value">{{ dashboard.summary.expiring_soon || 0 }}</div>
+                  <div class="muted">建议优先处理续期用户</div>
+                </div>
+              </div>
+              <div class="content-grid two-col">
+                <div class="panel">
+                  <div class="panel-title">最近新增用户</div>
+                  <div class="table-like">
+                    <div class="list-line" v-for="item in dashboard.recent_users" :key="item.id">
+                      <div>
+                        <div style="font-weight:600;">{{ item.name }}</div>
+                        <div class="muted">{{ item.phone }}</div>
+                      </div>
+                      <div style="text-align:right;">
+                        <a-tag :color="item.status === 'enabled' ? 'green' : (item.status === 'pending' ? 'orange' : 'red')">{{ item.status }}</a-tag>
+                        <div class="muted">{{ item.created_at }}</div>
+                      </div>
+                    </div>
+                  </div>
+                </div>
+                <div class="panel">
+                  <div class="panel-title">最近操作日志</div>
+                  <div class="table-like">
+                    <div class="list-line" v-for="item in dashboard.recent_logs" :key="item.id">
+                      <div>
+                        <div style="font-weight:600;">{{ item.action }}</div>
+                        <div class="muted">{{ item.actor_name || '-' }} · {{ item.detail || '-' }}</div>
+                      </div>
+                      <div class="muted">{{ item.created_at }}</div>
+                    </div>
+                  </div>
+                </div>
+              </div>
+            </template>
+
+            <template v-else-if="activeMenu === 'users'">
+              <div class="panel" style="margin-bottom:16px;display:flex;justify-content:space-between;align-items:center;">
+                <div>
+                  <div class="panel-title" style="margin-bottom:4px;">用户管理</div>
+                  <div class="muted">查看账号状态、授权数量与最近登录</div>
+                </div>
+                <a-button type="primary" @click="createVisible = true">新建用户</a-button>
+              </div>
+              <div class="panel">
+                <a-table :data="users" :pagination="false" row-key="id">
+                  <template #columns>
+                    <a-table-column title="姓名" data-index="name"></a-table-column>
+                    <a-table-column title="手机号" data-index="phone"></a-table-column>
+                    <a-table-column title="绑定设备" :width="220">
+                      <template #cell="{ record }">
+                        <div>{{ record.device_name || '-' }}</div>
+                        <div class="muted">{{ record.device_id || '-' }}</div>
+                      </template>
+                    </a-table-column>
+                    <a-table-column title="状态">
+                      <template #cell="{ record }">
+                        <a-tag :color="record.status === 'enabled' ? 'green' : (record.status === 'pending' ? 'orange' : 'red')">{{ record.status }}</a-tag>
+                      </template>
+                    </a-table-column>
+                    <a-table-column title="管理员">
+                      <template #cell="{ record }">{{ record.is_admin ? '是' : '否' }}</template>
+                    </a-table-column>
+                    <a-table-column title="功能数" data-index="permission_count"></a-table-column>
+                    <a-table-column title="到期时间" data-index="permission_end_at"></a-table-column>
+                    <a-table-column title="最近登录" data-index="last_login_at"></a-table-column>
+                    <a-table-column title="审批备注" data-index="approval_note"></a-table-column>
+                    <a-table-column title="操作" :width="360">
+                      <template #cell="{ record }">
+                        <a-space>
+                          <a-button size="mini" @click="activeMenu='permissions'; selectedUser=record; loadUserPermissions()">授权</a-button>
+                          <a-button v-if="record.status === 'pending'" size="mini" status="success" @click="approveUser(record)">审批通过</a-button>
+                          <a-button v-if="record.status === 'pending'" size="mini" status="danger" @click="rejectUser(record)">驳回</a-button>
+                          <a-button size="mini" status="warning" @click="unbindUserDevice(record)">解绑设备</a-button>
+                          <a-button size="mini" @click="openResetPassword(record)">重置密码</a-button>
+                          <a-button size="mini" status="warning" @click="toggleUser(record)">切换状态</a-button>
+                          <a-button size="mini" status="danger" @click="deleteUser(record)">删除</a-button>
+                        </a-space>
+                      </template>
+                    </a-table-column>
+                  </template>
+                </a-table>
+              </div>
+            </template>
+
+            <template v-else-if="activeMenu === 'permissions'">
+              <div class="content-grid three-col">
+                <div class="panel">
+                  <div class="section-row">
+                    <div class="panel-title" style="margin:0;">用户列表</div>
+                    <div class="muted">{{ users.length }} 人</div>
+                  </div>
+                  <div class="user-list">
+                    <div v-for="user in users" :key="user.id" class="user-card" :class="{ active: selectedUser && selectedUser.id === user.id }" @click="selectedUser = user; loadUserPermissions()">
+                      <div class="user-name">{{ user.name }}</div>
+                      <div class="muted">{{ user.phone }}</div>
+                      <div class="meta-row">
+                        <a-tag size="small" :color="user.status === 'enabled' ? 'green' : (user.status === 'pending' ? 'orange' : 'red')">{{ user.status }}</a-tag>
+                        <a-tag size="small">功能 {{ user.permission_count || 0 }}</a-tag>
+                      </div>
+                    </div>
+                  </div>
+                </div>
+
+                <div class="panel">
+                  <div class="section-row">
+                    <div class="panel-title" style="margin:0;">权限树</div>
+                    <a-input-search v-model="permissionSearch" placeholder="搜索车型 / ECU / 功能" style="width:260px;" allow-clear />
+                  </div>
+                  <div class="tree-scroll">
+                    <div v-for="group in filteredTree" :key="group.car + '-' + group.model" style="margin-bottom:18px;">
+                      <div style="font-weight:700; margin-bottom:8px;">{{ group.car }}</div>
+                      <div style="margin-left:8px;">
+                        <div style="font-weight:600; margin-bottom:8px; color:#4b5563;">{{ group.model }}</div>
+                        <div class="chip-wrap">
+                          <a-checkbox-group v-model="selectedFunctionIds">
+                            <a-checkbox v-for="func in group.functions" :key="func.id" :value="func.id">{{ func.label }}</a-checkbox>
+                          </a-checkbox-group>
+                        </div>
+                      </div>
+                    </div>
+                  </div>
+                </div>
+
+                <div class="panel">
+                  <div class="panel-title">授权配置</div>
+                  <template v-if="selectedUser">
+                    <div class="list-line">
+                      <div>
+                        <div style="font-weight:600;">{{ selectedUser.name }}</div>
+                        <div class="muted">{{ selectedUser.phone }}</div>
+                      </div>
+                      <a-tag :color="selectedUser.status === 'enabled' ? 'green' : (selectedUser.status === 'pending' ? 'orange' : 'red')">{{ selectedUser.status }}</a-tag>
+                    </div>
+                    <div style="margin-top:14px;">
+                      <div class="muted" style="margin-bottom:8px;">已选功能数</div>
+                      <div class="stat-value" style="font-size:24px;">{{ selectedFunctionIds.length }}</div>
+                    </div>
+                    <div style="margin-top:14px;">
+                      <div class="muted" style="margin-bottom:8px;">到期时间</div>
+                      <a-input v-model="permissionEndAt" placeholder="2026-12-31 23:59:59" />
+                    </div>
+                    <div style="margin-top:14px;">
+                      <div class="muted" style="margin-bottom:8px;">授权说明</div>
+                      <div class="muted">当前为第一版，按功能授权。后续可扩展模板、ECU 级授权与批量策略。</div>
+                    </div>
+                    <div class="footer-actions">
+                      <a-button type="primary" @click="savePermissions">保存授权</a-button>
+                      <a-button @click="selectedFunctionIds = []">清空选择</a-button>
+                    </div>
+                  </template>
+                  <template v-else>
+                    <div class="muted">请先从左侧选择一个用户</div>
+                  </template>
+                </div>
+              </div>
+            </template>
+
+            <template v-else-if="activeMenu === 'purchase'">
+              <div class="content-grid two-col">
+                <div class="panel">
+                  <div class="panel-title">开通弹窗配置</div>
+                  <div class="muted" style="margin-bottom:16px;">管理员只维护展示内容，客户端仍兼容原有 /purchase-config 数据结构。</div>
+                  <a-form layout="vertical">
+                    <a-form-item label="弹窗标题"><a-input v-model="purchaseForm.title" placeholder="功能开通" /></a-form-item>
+                    <a-form-item label="提示文案"><a-textarea v-model="purchaseForm.message" :auto-size="{ minRows: 4, maxRows: 8 }" placeholder="当前功能尚未开通，请扫码付款后联系管理员授权。" /></a-form-item>
+                    <a-form-item label="联系备注"><a-input v-model="purchaseForm.contact" placeholder="例如：付款备注手机号并联系微信 xxx" /></a-form-item>
+                    <a-form-item label="更新公告"><a-textarea v-model="purchaseForm.update_notice" :auto-size="{ minRows: 6, maxRows: 12 }" placeholder="每次启动和点击更新说明时展示" /></a-form-item>
+                    <a-grid :cols="2" :col-gap="12">
+                      <a-grid-item>
+                        <a-form-item label="最新版本"><a-input v-model="purchaseForm.latest_version" placeholder="例如：1.0.1" /></a-form-item>
+                      </a-grid-item>
+                      <a-grid-item>
+                        <a-form-item label="下载地址"><a-input v-model="purchaseForm.latest_download_url" placeholder="例如：https://example.com/app.zip" /></a-form-item>
+                      </a-grid-item>
+                    </a-grid>
+                    <a-grid :cols="3" :col-gap="12">
+                      <a-grid-item>
+                        <a-form-item label="强制更新">
+                          <a-select v-model="purchaseForm.force_update">
+                            <a-option value="0">关闭</a-option>
+                            <a-option value="1">开启</a-option>
+                          </a-select>
+                        </a-form-item>
+                      </a-grid-item>
+                      <a-grid-item>
+                        <a-form-item label="无密码注册">
+                          <a-select v-model="purchaseForm.allow_passwordless_register">
+                            <a-option value="0">关闭</a-option>
+                            <a-option value="1">开启</a-option>
+                          </a-select>
+                        </a-form-item>
+                      </a-grid-item>
+                      <a-grid-item>
+                        <a-form-item label="注册需审批">
+                          <a-select v-model="purchaseForm.registration_requires_approval">
+                            <a-option value="1">开启</a-option>
+                            <a-option value="0">关闭</a-option>
+                          </a-select>
+                        </a-form-item>
+                      </a-grid-item>
+                    </a-grid>
+                    <a-space>
+                      <a-button type="primary" @click="savePurchaseConfig">保存配置</a-button>
+                      <a-button @click="activeMenu='wiring-guides'; loadWiringGuides()">前往接线图管理</a-button>
+                    </a-space>
+                  </a-form>
+                </div>
+                <div class="panel">
+                  <div class="panel-title">收款码预览</div>
+                  <div style="display:flex;gap:18px;align-items:flex-start;flex-wrap:wrap;">
+                    <div class="preview-box">
+                      <img v-if="purchaseForm.payment_qr_preview" :src="purchaseForm.payment_qr_preview" alt="收款码" />
+                      <div v-else class="preview-hint">上传后在这里预览收款码</div>
+                    </div>
+                    <div style="flex:1;min-width:220px;display:grid;gap:12px;">
+                      <div class="muted">推荐上传清晰的 PNG / JPG 图片，客户端将直接显示这张收款码。</div>
+                      <a-upload :custom-request="uploadQrCode" :show-file-list="false">
+                        <template #upload-button>
+                          <a-button type="outline">上传收款码图片</a-button>
+                        </template>
+                      </a-upload>
+                      <a-input v-model="purchaseForm.qr_code_url" placeholder="图片地址由上传自动生成，可按需保留" />
+                    </div>
+                  </div>
+                </div>
+                <div class="panel" style="grid-column: 1 / -1;">
+                  <div class="section-row">
+                    <div>
+                      <div class="panel-title" style="margin-bottom:4px;">资料中心</div>
+                      <div class="muted">这里维护用户在客户端可看到的资料卡片，不再直接编辑 JSON。</div>
+                    </div>
+                    <a-space>
+                      <a-button @click="loadPurchaseConfig">刷新</a-button>
+                      <a-button type="primary" @click="openCreateAsset">新增资料</a-button>
+                    </a-space>
+                  </div>
+                  <div v-if="virtualAssets.length" class="asset-grid">
+                    <div v-for="item in virtualAssets" :key="item.id || item.title || item.file_url" class="asset-card">
+                      <div class="asset-cover">
+                        <img v-if="item.image_url" :src="item.image_url" :alt="item.title || item.name" />
+                        <div v-else class="asset-placeholder">暂无封面预览</div>
+                      </div>
+                      <div class="asset-body">
+                        <div class="asset-title-row">
+                          <div class="asset-title">{{ item.title || item.name || '未命名资料' }}</div>
+                          <a-tag :color="item.is_enabled ? 'green' : 'red'">{{ item.is_enabled ? '启用' : '停用' }}</a-tag>
+                        </div>
+                        <div class="asset-summary">{{ item.summary || item.description || '暂无说明' }}</div>
+                        <div class="asset-meta">
+                          <div>文件：{{ item.file_name || '未上传' }}</div>
+                          <div>适配关键词：{{ item.keywords || '-' }}</div>
+                          <div>按钮文案：{{ item.download_text || item.button_text || '立即查看' }}</div>
+                          <div>排序：{{ item.sort_order || 0 }}</div>
+                        </div>
+                        <div class="asset-actions">
+                          <a-button size="mini" @click="openEditAsset(item)">编辑</a-button>
+                          <a-button size="mini" type="outline" @click="openExternal(item.file_url || item.url)">预览</a-button>
+                          <a-button size="mini" status="danger" @click="deleteAsset(item)">移除</a-button>
+                        </div>
+                      </div>
+                    </div>
+                  </div>
+                  <a-empty v-else description="暂无资料，点击右上角新增资料"></a-empty>
+                </div>
+              </div>
+            </template>
+
+            <template v-else-if="activeMenu === 'wiring-guides'">
+              <div class="panel">
+                <div class="section-row">
+                  <div>
+                    <div class="panel-title" style="margin-bottom:4px;">接线图资料库</div>
+                    <div class="muted">按车型、ECU 型号和关键词维护资料卡片，客户端会自动用于搜索与下载。</div>
+                  </div>
+                  <a-space>
+                    <a-input-search v-model="wiringGuideSearch" placeholder="搜索型号/车型/关键词" allow-clear style="width:260px;" @search="loadWiringGuides" @clear="loadWiringGuides" />
+                    <a-button @click="loadWiringGuides">刷新</a-button>
+                    <a-button type="primary" @click="openCreateWiringGuide">新增接线图</a-button>
+                  </a-space>
+                </div>
+                <div v-if="wiringGuides.length" class="asset-grid">
+                  <div v-for="record in wiringGuides" :key="record.id" class="asset-card">
+                    <div class="asset-cover">
+                      <img v-if="record.preview_image_url || record.image_url" :src="record.preview_image_url || record.image_url" :alt="record.name" />
+                      <div v-else class="asset-placeholder">暂无预览图</div>
+                    </div>
+                    <div class="asset-body">
+                      <div class="asset-title-row">
+                        <div class="asset-title">{{ record.name || '未命名接线图' }}</div>
+                        <a-tag :color="record.is_enabled ? 'green' : 'red'">{{ record.is_enabled ? '启用' : '停用' }}</a-tag>
+                      </div>
+                      <div class="asset-summary">{{ record.description || '暂无说明' }}</div>
+                      <div class="asset-meta">
+                        <div>ECU 型号：{{ record.model || '-' }}</div>
+                        <div>适用车型：{{ record.car_model || '-' }}</div>
+                        <div>关键词：{{ record.keywords || '-' }}</div>
+                        <div>资料文件：{{ record.file_name || '未上传' }}</div>
+                      </div>
+                      <div class="asset-actions">
+                        <a-button size="mini" @click="openEditWiringGuide(record)">编辑</a-button>
+                        <a-button size="mini" type="outline" @click="openExternal(record.download_url || record.file_url)">预览</a-button>
+                        <a-button size="mini" status="danger" @click="deleteWiringGuide(record)">删除</a-button>
+                      </div>
+                    </div>
+                  </div>
+                </div>
+                <a-empty v-else description="暂无接线图资料"></a-empty>
+              </div>
+            </template>
+
+            <template v-else-if="activeMenu === 'logs'">
+              <div class="panel">
+                <div class="panel-title">操作日志</div>
+                <a-table :data="logs" :pagination="{ pageSize: 20 }" row-key="id">
+                  <template #columns>
+                    <a-table-column title="时间" data-index="created_at" :width="180"></a-table-column>
+                    <a-table-column title="操作人" data-index="actor_name" :width="120"></a-table-column>
+                    <a-table-column title="动作" data-index="action" :width="180"></a-table-column>
+                    <a-table-column title="对象类型" data-index="target_type" :width="120"></a-table-column>
+                    <a-table-column title="对象ID" data-index="target_id" :width="100"></a-table-column>
+                    <a-table-column title="详情" data-index="detail"></a-table-column>
+                  </template>
+                </a-table>
+              </div>
+            </template>
+
+            <a-modal v-model:visible="createVisible" title="新建用户" @ok="createUser">
+              <a-form layout="vertical">
+                <a-form-item label="姓名"><a-input v-model="createForm.name" /></a-form-item>
+                <a-form-item label="手机号"><a-input v-model="createForm.phone" /></a-form-item>
+                <a-form-item label="密码"><a-input-password v-model="createForm.password" /></a-form-item>
+                <a-form-item label="状态">
+                  <a-select v-model="createForm.status">
+                    <a-option value="enabled">enabled</a-option>
+                    <a-option value="pending">pending</a-option>
+                    <a-option value="disabled">disabled</a-option>
+                  </a-select>
+                </a-form-item>
+              </a-form>
+            </a-modal>
+
+            <a-modal v-model:visible="resetPasswordVisible" :title="'重置密码 - ' + (resetPasswordUser ? resetPasswordUser.name : '')" @ok="resetPassword">
+              <a-form layout="vertical">
+                <a-form-item label="新密码">
+                  <a-input-password v-model="resetPasswordForm.password" placeholder="请输入新密码" />
+                </a-form-item>
+              </a-form>
+            </a-modal>
+
+            <a-modal v-model:visible="assetVisible" :title="assetForm.id ? '编辑资料' : '新增资料'" :confirm-loading="assetSubmitting" @ok="saveAsset" width="760px">
+              <a-form layout="vertical">
+                <a-form-item label="资料名称"><a-input v-model="assetForm.title" placeholder="例如：基础资料包 / 说明文档" /></a-form-item>
+                <a-grid :cols="2" :col-gap="12">
+                  <a-grid-item>
+                    <a-form-item label="资料类型">
+                      <a-select v-model="assetForm.category">
+                        <a-option value="manual">说明文档</a-option>
+                        <a-option value="package">资料包</a-option>
+                        <a-option value="image">图片</a-option>
+                        <a-option value="other">其他</a-option>
+                      </a-select>
+                    </a-form-item>
+                  </a-grid-item>
+                  <a-grid-item>
+                    <a-form-item label="按钮文案"><a-input v-model="assetForm.download_text" placeholder="例如：立即查看 / 下载资料包" /></a-form-item>
+                  </a-grid-item>
+                </a-grid>
+                <a-form-item label="资料说明"><a-textarea v-model="assetForm.summary" :auto-size="{ minRows: 3, maxRows: 6 }" /></a-form-item>
+                <a-form-item label="适配关键词"><a-input v-model="assetForm.keywords" placeholder="例如：ME7.8.8, EA211, 朗逸" /></a-form-item>
+                <div style="display:flex;gap:18px;align-items:flex-start;flex-wrap:wrap;margin-bottom:12px;">
+                  <div class="preview-box">
+                    <img v-if="assetForm.image_url" :src="assetForm.image_url" alt="资料封面" />
+                    <div v-else class="preview-hint">可上传封面，未上传则按文件类型自动展示</div>
+                  </div>
+                  <div style="flex:1;min-width:220px;display:grid;gap:12px;">
+                    <a-form-item label="上传资料文件">
+                      <a-upload :custom-request="uploadAssetFile" :show-file-list="false">
+                        <template #upload-button>
+                          <a-button type="outline">选择资料文件</a-button>
+                        </template>
+                      </a-upload>
+                    </a-form-item>
+                    <a-form-item label="封面图地址"><a-input v-model="assetForm.image_url" placeholder="上传图片资料后会自动回填，可按需调整" /></a-form-item>
+                    <div class="muted">当前文件：{{ assetForm.file_name || '未上传' }} · {{ assetForm.file_size || 0 }} bytes</div>
+                  </div>
+                </div>
+                <a-grid :cols="2" :col-gap="12">
+                  <a-grid-item>
+                    <a-form-item label="排序"><a-input-number v-model="assetForm.sort_order" :min="0" /></a-form-item>
+                  </a-grid-item>
+                  <a-grid-item>
+                    <a-form-item label="状态">
+                      <a-select v-model="assetForm.is_enabled">
+                        <a-option :value="1">启用</a-option>
+                        <a-option :value="0">停用</a-option>
+                      </a-select>
+                    </a-form-item>
+                  </a-grid-item>
+                </a-grid>
+              </a-form>
+            </a-modal>
+
+            <a-modal v-model:visible="wiringGuideVisible" :title="wiringGuideForm.id ? '编辑接线图' : '新增接线图'" :confirm-loading="wiringGuideSubmitting" @ok="saveWiringGuide" width="760px">
+              <a-form layout="vertical">
+                <a-form-item label="资源名称"><a-input v-model="wiringGuideForm.name" placeholder="例如：ME7.8.8 接线图" /></a-form-item>
+                <a-grid :cols="2" :col-gap="12">
+                  <a-grid-item>
+                    <a-form-item label="ECU 型号"><a-input v-model="wiringGuideForm.model" placeholder="ME7.8.8" /></a-form-item>
+                  </a-grid-item>
+                  <a-grid-item>
+                    <a-form-item label="车型"><a-input v-model="wiringGuideForm.car_model" placeholder="朗逸 1.6" /></a-form-item>
+                  </a-grid-item>
+                </a-grid>
+                <a-form-item label="关键词"><a-input v-model="wiringGuideForm.keywords" placeholder="EA211, 朗逸, BOSCH" /></a-form-item>
+                <a-form-item label="资料说明"><a-textarea v-model="wiringGuideForm.description" :auto-size="{ minRows: 3, maxRows: 6 }" /></a-form-item>
+                <div style="display:flex;gap:18px;align-items:flex-start;flex-wrap:wrap;margin-bottom:12px;">
+                  <div class="preview-box">
+                    <img v-if="wiringGuideForm.preview_image_url" :src="wiringGuideForm.preview_image_url" alt="接线图预览" />
+                    <div v-else class="preview-hint">可上传封面或直接填写预览图地址</div>
+                  </div>
+                  <div style="flex:1;min-width:220px;display:grid;gap:12px;">
+                    <a-form-item label="上传接线图文件">
+                      <a-upload :custom-request="uploadWiringGuideFile" :show-file-list="false">
+                        <template #upload-button>
+                          <a-button type="outline">选择接线图文件</a-button>
+                        </template>
+                      </a-upload>
+                    </a-form-item>
+                    <a-form-item label="预览图地址"><a-input v-model="wiringGuideForm.preview_image_url" placeholder="图片型文件会自动回填，也可手工填写展示图" /></a-form-item>
+                    <div class="muted">当前文件：{{ wiringGuideForm.file_name || '未上传' }} · {{ wiringGuideForm.file_size || 0 }} bytes</div>
+                  </div>
+                </div>
+                <a-grid :cols="2" :col-gap="12">
+                  <a-grid-item>
+                    <a-form-item label="排序"><a-input-number v-model="wiringGuideForm.sort_order" :min="0" /></a-form-item>
+                  </a-grid-item>
+                  <a-grid-item>
+                    <a-form-item label="状态">
+                      <a-select v-model="wiringGuideForm.is_enabled">
+                        <a-option :value="1">启用</a-option>
+                        <a-option :value="0">停用</a-option>
+                      </a-select>
+                    </a-form-item>
+                  </a-grid-item>
+                </a-grid>
+              </a-form>
+            </a-modal>
+          </main>
+        </div>
+      `
+    }).use(ArcoVue).mount('#app');
+  </script>
+</body>
+</html>
