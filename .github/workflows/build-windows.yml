@@ -1,0 +1,40 @@
+name: build-windows
+
+on:
+  push:
+    branches: [ main ]
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: windows-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.9'
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+          pip install PyQt5 pyinstaller
+
+      - name: Build exe
+        run: |
+          pyinstaller --noconfirm --clean --windowed --name ECUFlash --hidden-import PyQt5.sip frontend.py
+
+      - name: Compress output
+        shell: pwsh
+        run: |
+          Compress-Archive -Path dist/ECUFlash/* -DestinationPath dist/ECUFlash-windows.zip -Force
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ECUFlash-windows
+          path: dist/ECUFlash-windows.zip
