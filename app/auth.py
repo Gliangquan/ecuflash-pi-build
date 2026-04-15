@@ -354,8 +354,9 @@ def me(user: dict = Depends(get_current_user)) -> UserOut:
 def my_permissions(user: dict = Depends(get_current_user)) -> dict:
     sql = text(
         """
-        SELECT p.function_id, p.end_at, p.status
+        SELECT p.function_id, f.name AS function_name, p.end_at, p.status
         FROM app_user_function_permission p
+        LEFT JOIN ecu_function f ON f.id = p.function_id
         WHERE p.user_id = :user_id
           AND p.status = 'enabled'
           AND (p.end_at IS NULL OR p.end_at > NOW())
@@ -367,14 +368,23 @@ def my_permissions(user: dict = Depends(get_current_user)) -> dict:
     items = [
         {
             "function_id": row["function_id"],
+            "function_name": row.get("function_name"),
             "end_at": str(row["end_at"]) if row["end_at"] else None,
             "status": row["status"],
         }
         for row in rows
     ]
+    function_names = []
+    seen = set()
+    for item in items:
+        name = str(item.get("function_name") or "").strip()
+        if name and name not in seen:
+            seen.add(name)
+            function_names.append(name)
     return {
         "user_id": user["id"],
         "is_admin": bool(user["is_admin"]),
         "items": items,
         "function_ids": [item["function_id"] for item in items],
+        "function_names": function_names,
     }

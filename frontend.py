@@ -54,6 +54,16 @@ _ORIGINAL_SET_FIXED_SIZE = None
 _UI_SCALE_PATCHED = False
 _APP_LOGO_PIXMAP_CACHE = None
 _APP_LOGO_ICON_CACHE = None
+_FUNCTION_ICON_CACHE = {}
+_FUNCTION_ICON_NAME_MAP = {
+    "三项未就绪": "repair-order.png",
+    "接线图查询": "dedicated-line.png",
+    "文件下载": "file-download.png",
+    "学习资料": "file-download.png",
+    "怠速调整": "system-settings.png",
+    "防盗关闭": "security-shield.png",
+    "无防盗": "security-shield.png",
+}
 
 
 def _calc_ui_scale_factor(app):
@@ -153,6 +163,58 @@ def _get_app_logo_icon():
     if _APP_LOGO_ICON_CACHE.isNull():
         _APP_LOGO_ICON_CACHE = None
     return _APP_LOGO_ICON_CACHE
+
+
+def _guess_function_icon_filename(title):
+    text = str(title or "").strip()
+    if not text:
+        return "system-settings.png"
+    if text in _FUNCTION_ICON_NAME_MAP:
+        return _FUNCTION_ICON_NAME_MAP[text]
+    if any(token in text for token in ("防盗", "安全", "授权")):
+        return "security-shield.png"
+    if any(token in text for token in ("下载", "文件", "资料")):
+        return "file-download.png"
+    if any(token in text for token in ("检测", "诊断", "识别")):
+        return "diagnostic-track.png"
+    if any(token in text for token in ("车辆", "车系", "车型")):
+        return "vehicle-settings.png"
+    if any(token in text for token in ("线路", "接线", "线")):
+        return "dedicated-line.png"
+    if any(token in text for token in ("工单", "检修", "未就绪", "修复")):
+        return "repair-order.png"
+    return "system-settings.png"
+
+
+def _get_function_icon(title, size=42):
+    icon_name = _guess_function_icon_filename(title)
+    cache_key = f"{icon_name}:{size}"
+    if cache_key in _FUNCTION_ICON_CACHE:
+        return _FUNCTION_ICON_CACHE[cache_key]
+    icon_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "icon", icon_name)
+    if not os.path.exists(icon_path):
+        return QIcon()
+    pixmap = QPixmap(icon_path)
+    if pixmap.isNull():
+        return QIcon()
+
+    scaled = pixmap.scaled(size, size, Qt.KeepAspectRatio, Qt.SmoothTransformation)
+    brightened = QPixmap(scaled.size())
+    brightened.fill(Qt.transparent)
+
+    painter = QPainter(brightened)
+    painter.setRenderHint(QPainter.SmoothPixmapTransform, True)
+    painter.drawPixmap(0, 0, scaled)
+    painter.setCompositionMode(QPainter.CompositionMode_Screen)
+    painter.fillRect(brightened.rect(), QColor(120, 220, 255, 28))
+    painter.setCompositionMode(QPainter.CompositionMode_SourceOver)
+    painter.setOpacity(0.12)
+    painter.drawPixmap(0, 0, scaled)
+    painter.end()
+
+    icon = QIcon(brightened)
+    _FUNCTION_ICON_CACHE[cache_key] = icon
+    return icon
 
 
 def apply_logo_to_window(window_obj):
@@ -290,7 +352,11 @@ def clear_session_data():
 def fetch_my_permissions(token):
     data = _api_request_json("/auth/my-permissions", token=token)
     function_ids = data.get("function_ids") or []
-    return set(int(item) for item in function_ids)
+    function_names = data.get("function_names") or []
+    return {
+        "ids": set(int(item) for item in function_ids),
+        "names": set(str(item).strip() for item in function_names if str(item).strip()),
+    }
 
 
 def fetch_purchase_config(token):
@@ -352,6 +418,10 @@ def _open_url(url):
     if not resolved:
         return False
     return QDesktopServices.openUrl(QUrl(resolved))
+
+
+def _open_browser_download(url):
+    return _open_url(url)
 
 
 def _copy_text_to_clipboard(text):
@@ -421,7 +491,9 @@ def check_license():
         session["user"] = user
         session["name"] = user.get("name") or user.get("phone") or "未命名用户"
         session["expire_time"] = session.get("expired_at") or "长期有效"
-        session["permission_function_ids"] = sorted(fetch_my_permissions(session["token"]))
+        permissions = fetch_my_permissions(session["token"])
+        session["permission_function_ids"] = sorted(permissions["ids"])
+        session["permission_function_names"] = sorted(permissions["names"])
         try:
             session["purchase_config"] = fetch_purchase_config(session["token"])
         except Exception:
@@ -524,7 +596,8 @@ class RegisterDialog(QDialog):
             "user": data.get("user", {}),
             "name": data.get("user", {}).get("name") or data.get("user", {}).get("phone") or phone,
             "expire_time": data.get("expired_at") or "长期有效",
-            "permission_function_ids": sorted(fetch_my_permissions(token)),
+            "permission_function_ids": sorted(fetch_my_permissions(token)["ids"]),
+            "permission_function_names": sorted(fetch_my_permissions(token)["names"]),
         }
         try:
             session["purchase_config"] = fetch_purchase_config(token)
@@ -1448,14 +1521,14 @@ class ECUFlashWindow(QMainWindow):
         brand_layout.addWidget(logo_label, 0, Qt.AlignVCenter)
         brand_layout.addLayout(title_vbox)
 
-        resource_download_btn = QPushButton("资料下载")
-        wiring_guide_btn = QPushButton("接线图查询")
+        resource_download_btn = QPushButton("文件下载")
+        learning_btn = QPushButton("学习资料")
         checksum_btn = QPushButton("计算校验和")
         purchase_btn = QPushButton("开通功能")
         log_btn = QPushButton("更新说明")
         logout_btn = QPushButton("退出登录")
         self.logout_btn = logout_btn
-        for btn in [resource_download_btn, wiring_guide_btn, checksum_btn, purchase_btn, log_btn, logout_btn]:
+        for btn in [resource_download_btn, learning_btn, checksum_btn, purchase_btn, log_btn, logout_btn]:
             btn.setStyleSheet("""
                 QPushButton {
                     background: qlineargradient(x1:0,y1:0,x2:1,y2:0,stop:0 #FF8800,stop:1 #FFAA00);
@@ -1473,7 +1546,7 @@ class ECUFlashWindow(QMainWindow):
             """)
 
         resource_download_btn.clicked.connect(self.open_resource_download_dialog)
-        wiring_guide_btn.clicked.connect(self.open_wiring_guide_dialog)
+        learning_btn.clicked.connect(self.open_learning_articles_dialog)
         checksum_btn.clicked.connect(self.open_checksum_dialog)
         purchase_btn.clicked.connect(lambda: self.show_purchase_dialog())
 
@@ -1481,7 +1554,7 @@ class ECUFlashWindow(QMainWindow):
         btn_layout.setSpacing(6)
         btn_layout.addStretch()
         btn_layout.addWidget(resource_download_btn)
-        btn_layout.addWidget(wiring_guide_btn)
+        btn_layout.addWidget(learning_btn)
         btn_layout.addWidget(checksum_btn)
         btn_layout.addWidget(purchase_btn)
         btn_layout.addWidget(log_btn)
@@ -1778,38 +1851,46 @@ class ECUFlashWindow(QMainWindow):
         """)
         right_layout.addWidget(func_title)
 
-        self.func_tip_label = QLabel("提示：请打开文件后 点击ECU识别再操作功能")
-        self.func_tip_label.setStyleSheet("""
-            QLabel {
-                font-size: 14px;
-                color: #F3D86A;
-                text-align: left;
-                padding: 12px 14px;
-                background-color: rgba(16, 41, 96, 0.58);
-                border: 1px solid rgba(99, 141, 220, 0.45);
-                border-radius: 10px;
-                margin: 6px 0 4px 0;
-            }
-        """)
-        self.func_tip_label.setAlignment(Qt.AlignLeft | Qt.AlignVCenter)
-        right_layout.addWidget(self.func_tip_label)
+        self.func_tip_label = QLabel("")
+        self.func_tip_label.hide()
 
-        self.func_buttons_container = QWidget()
-        self.func_buttons_container.setStyleSheet("""
-            QWidget {
+        self.func_scroll = QScrollArea()
+        self.func_scroll.setWidgetResizable(True)
+        self.func_scroll.setFrameShape(QFrame.NoFrame)
+        self.func_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        self.func_scroll.setVerticalScrollBarPolicy(Qt.ScrollBarAsNeeded)
+        self.func_scroll.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
+        self.func_scroll.setFixedHeight(scaled_px(420))
+        self.func_scroll.setStyleSheet("""
+            QScrollArea {
                 background-color: rgba(8, 22, 52, 0.88);
                 border: 1px solid rgba(73, 112, 196, 0.34);
                 border-radius: 16px;
             }
+            QScrollBar:vertical {
+                background: rgba(6, 23, 78, 0.65);
+                width: 10px;
+                margin: 8px 4px 8px 0;
+                border-radius: 5px;
+            }
+            QScrollBar::handle:vertical {
+                background: rgba(96, 165, 250, 0.72);
+                min-height: 30px;
+                border-radius: 5px;
+            }
+            QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical {
+                height: 0px;
+            }
         """)
-        self.func_buttons_layout = QGridLayout(self.func_buttons_container)
-        self.func_buttons_layout.setContentsMargins(16, 16, 16, 16)
-        self.func_buttons_layout.setHorizontalSpacing(14)
-        self.func_buttons_layout.setVerticalSpacing(14)
-        right_layout.addWidget(self.func_buttons_container)
+        self.func_content = QWidget()
+        self.func_content.setStyleSheet("background: transparent; border: none;")
+        self.func_content_layout = QVBoxLayout(self.func_content)
+        self.func_content_layout.setContentsMargins(12, 16, 12, 16)
+        self.func_content_layout.setSpacing(scaled_px(14))
+        self.func_content_layout.setAlignment(Qt.AlignTop)
+        self.func_scroll.setWidget(self.func_content)
+        right_layout.addWidget(self.func_scroll)
         self.show_default_step3_button()
-        
-        right_layout.addStretch()
 
         main_content_layout.addWidget(left_panel)
         main_content_layout.addWidget(right_panel)
@@ -1894,29 +1975,11 @@ class ECUFlashWindow(QMainWindow):
             show_message(self, QMessageBox.Warning, "提示", "当前资源没有可下载文件")
             return False
         resolved = _resolve_resource_url(link)
-        file_name = (item.get("file_name") or item.get("name") or item.get("title") or "resource.bin").strip()
-        try:
-            request = urllib.request.Request(resolved, headers={"Accept": "*/*"})
-            with urllib.request.urlopen(request, timeout=20) as response:
-                data = response.read()
-        except Exception as exc:
-            show_message(self, QMessageBox.Critical, "下载失败", f"资源下载失败：{exc}")
-            return False
-
-        desktop_path = os.path.join(os.path.expanduser("~"), "Desktop")
-        default_path = os.path.join(desktop_path, file_name)
-        save_path, _ = QFileDialog.getSaveFileName(self, "保存资源", default_path, "所有文件 (*.*)")
-        if not save_path:
-            return False
-        try:
-            with open(save_path, "wb") as file_obj:
-                file_obj.write(data)
-            self.add_operation_log(f"资源下载完成：{save_path}")
-            show_message(self, QMessageBox.Information, "下载完成", f"文件已保存到：{save_path}")
+        if _open_browser_download(resolved):
+            self.add_operation_log(f"浏览器下载已打开：{resolved}")
             return True
-        except Exception as exc:
-            show_message(self, QMessageBox.Critical, "保存失败", f"保存文件失败：{exc}")
-            return False
+        show_message(self, QMessageBox.Critical, "下载失败", "无法拉起浏览器下载")
+        return False
 
     def _show_resource_detail_dialog(self, item, title_text="资源详情"):
         dialog = QDialog(self)
@@ -1991,332 +2054,261 @@ class ECUFlashWindow(QMainWindow):
         dialog.exec_()
 
     def _show_wiring_guide_detail_dialog(self, item):
-        dialog = QDialog(self)
-        dialog.setWindowTitle("接线图详情")
-        apply_logo_to_window(dialog)
-        dialog.resize(980, 720)
-        dialog.setStyleSheet(
-            "QDialog{background:#060B16;} QLabel{color:#E5E7EB;} "
-            "QPushButton{background:#2563EB;color:white;border:none;border-radius:8px;padding:10px 18px;font-size:14px;font-weight:bold;} "
-            "QFrame{background:rgba(8,24,64,0.94);border:1px solid rgba(76,133,231,0.40);border-radius:14px;}"
-        )
-        layout = QVBoxLayout(dialog)
-        layout.setContentsMargins(20, 20, 20, 20)
-        layout.setSpacing(14)
-
-        title_text = item.get("name") or "未命名接线图"
-        title_label = QLabel(title_text)
-        title_label.setStyleSheet("font-size:22px;font-weight:bold;color:#93C5FD;")
-        layout.addWidget(title_label)
-
-        subtitle = QLabel(f"ECU：{item.get('model') or '-'}    车型：{item.get('car_model') or '-'}")
-        subtitle.setStyleSheet("font-size:13px;color:#94A3B8;")
-        layout.addWidget(subtitle)
-
-        body = QHBoxLayout()
-        body.setSpacing(16)
-
-        preview_frame = QFrame()
-        preview_layout = QVBoxLayout(preview_frame)
-        preview_layout.setContentsMargins(16, 16, 16, 16)
-        preview_layout.setSpacing(10)
-        preview_label = QLabel("正在加载接线图预览")
-        preview_label.setAlignment(Qt.AlignCenter)
-        preview_label.setMinimumSize(520, 520)
-        preview_label.setWordWrap(True)
-        preview_label.setStyleSheet("background:rgba(3,10,28,0.96);border-radius:12px;color:#94A3B8;font-size:14px;")
-        pixmap = self._load_remote_pixmap(self._resource_preview_url(item))
-        if pixmap and not pixmap.isNull():
-            preview_label.setPixmap(pixmap.scaled(540, 540, Qt.KeepAspectRatio, Qt.SmoothTransformation))
-        else:
-            preview_label.setText("当前接线图未提供图片预览\n可先下载到本地查看原文件")
-        preview_layout.addWidget(preview_label)
-        body.addWidget(preview_frame, 7)
-
-        side_frame = QFrame()
-        side_layout = QVBoxLayout(side_frame)
-        side_layout.setContentsMargins(16, 16, 16, 16)
-        side_layout.setSpacing(12)
-        for text_value in [
-            f"ECU 型号：{item.get('model') or '-'}",
-            f"适用车型：{item.get('car_model') or '-'}",
-            f"搜索关键词：{item.get('keywords') or '-'}",
-            f"资料文件：{item.get('file_name') or '未提供文件名'}",
-            f"说明：{item.get('description') or item.get('remark') or '暂无说明'}",
-        ]:
-            label = QLabel(text_value)
-            label.setWordWrap(True)
-            label.setStyleSheet("font-size:14px;line-height:1.7;color:#D1D5DB;")
-            side_layout.addWidget(label)
-        side_layout.addStretch()
-        body.addWidget(side_frame, 4)
-
-        layout.addLayout(body)
-
-        button_row = QHBoxLayout()
-        button_row.addStretch()
-        download_btn = QPushButton("下载接线图")
-        download_btn.clicked.connect(lambda: self._download_resource_file(item))
-        close_btn = QPushButton("关闭")
-        close_btn.clicked.connect(dialog.accept)
-        button_row.addWidget(download_btn)
-        button_row.addWidget(close_btn)
-        layout.addLayout(button_row)
-        dialog.exec_()
+        self._download_resource_file(item)
 
     def _open_wiring_guide_list_dialog(self, items):
         dialog = QDialog(self)
         dialog.setWindowTitle("接线图查询")
         apply_logo_to_window(dialog)
-        dialog.resize(980, 760)
+        dialog.resize(880, 620)
         dialog.setStyleSheet(
             "QDialog{background:#060B16;} QLabel{color:#E5E7EB;} "
-            "QPushButton{background:#2563EB;color:white;border:none;border-radius:8px;padding:8px 16px;font-size:14px;font-weight:bold;} "
-            "QFrame{background:rgba(8,24,64,0.94);border:1px solid rgba(76,133,231,0.40);border-radius:12px;} "
-            "QLineEdit{background:rgba(3,10,28,0.96);color:#E5E7EB;border:1px solid rgba(96,165,250,0.35);border-radius:8px;padding:10px 12px;font-size:14px;}"
+            "QPushButton{background:#2563EB;color:white;border:none;border-radius:8px;padding:10px 18px;font-size:14px;font-weight:bold;} "
+            "QLineEdit{background:rgba(3,10,28,0.96);color:#E5E7EB;border:1px solid rgba(96,165,250,0.35);border-radius:8px;padding:12px 14px;font-size:18px;} "
+            "QListWidget{background:rgba(8,24,64,0.94);color:#E5E7EB;border:1px solid rgba(76,133,231,0.40);border-radius:12px;font-size:15px;} "
+            "QListWidget::item{padding:12px 14px;} QListWidget::item:selected{background:#1D4ED8;}"
         )
         layout = QVBoxLayout(dialog)
-        layout.setContentsMargins(20, 20, 20, 20)
-        layout.setSpacing(14)
+        layout.setContentsMargins(24, 24, 24, 24)
+        layout.setSpacing(16)
 
         title = QLabel("接线图查询")
-        title.setStyleSheet("font-size:20px;font-weight:bold;color:#93C5FD;")
+        title.setStyleSheet("font-size:24px;font-weight:bold;color:#93C5FD;")
         layout.addWidget(title)
 
-        tip = QLabel("输入 ECU 型号 / 车型 / 关键词后筛选接线图，查看和下载都在软件内完成")
-        tip.setStyleSheet("font-size:13px;color:#94A3B8;")
-        layout.addWidget(tip)
-
         search_edit = QLineEdit(dialog)
-        search_edit.setPlaceholderText("输入接线图型号，例如 ME7.8.8、朗逸、EA211")
+        search_edit.setPlaceholderText("输入 ECU 型号，例如 1234、12345、ME7.8.8")
         layout.addWidget(search_edit)
 
-        result_label = QLabel("")
-        result_label.setStyleSheet("font-size:12px;color:#60A5FA;")
+        result_label = QLabel("请输入型号后搜索")
+        result_label.setStyleSheet("font-size:14px;color:#60A5FA;")
         layout.addWidget(result_label)
 
-        scroll = QScrollArea(dialog)
-        scroll.setWidgetResizable(True)
-        scroll.setFrameShape(QFrame.NoFrame)
-        content = QWidget()
-        content_layout = QVBoxLayout(content)
-        content_layout.setContentsMargins(0, 0, 0, 0)
-        content_layout.setSpacing(12)
-        scroll.setWidget(content)
-        layout.addWidget(scroll)
+        list_widget = QListWidget(dialog)
+        layout.addWidget(list_widget)
 
-        def clear_layout(target_layout):
-            while target_layout.count():
-                child = target_layout.takeAt(0)
-                widget = child.widget()
-                nested_layout = child.layout()
-                if widget is not None:
-                    widget.deleteLater()
-                elif nested_layout is not None:
-                    clear_layout(nested_layout)
-
-        def add_card(target_layout, item):
-            card = QFrame()
-            card_layout = QHBoxLayout(card)
-            card_layout.setContentsMargins(16, 14, 16, 14)
-            card_layout.setSpacing(14)
-
-            preview_label = QLabel()
-            preview_label.setFixedSize(180, 120)
-            preview_label.setAlignment(Qt.AlignCenter)
-            preview_label.setWordWrap(True)
-            preview_label.setStyleSheet("background:rgba(3,10,28,0.96);border-radius:10px;color:#94A3B8;font-size:12px;")
-            thumb = self._load_remote_pixmap(self._resource_preview_url(item))
-            if thumb and not thumb.isNull():
-                preview_label.setPixmap(thumb.scaled(180, 120, Qt.KeepAspectRatioByExpanding, Qt.SmoothTransformation))
-            else:
-                preview_label.setText("暂无接线图预览")
-            card_layout.addWidget(preview_label)
-
-            text_layout = QVBoxLayout()
-            text_layout.setSpacing(6)
-            name = QLabel(item.get("name") or "未命名接线图")
-            name.setStyleSheet("font-size:16px;font-weight:bold;color:#E5E7EB;")
-            text_layout.addWidget(name)
-            meta = QLabel(f"ECU：{item.get('model') or '-'}    车型：{item.get('car_model') or '-'}")
-            meta.setStyleSheet("font-size:12px;color:#93C5FD;")
-            text_layout.addWidget(meta)
-            desc = QLabel(item.get("description") or item.get("remark") or "暂无说明")
-            desc.setWordWrap(True)
-            desc.setStyleSheet("font-size:13px;color:#CBD5E1;")
-            text_layout.addWidget(desc)
-            key_label = QLabel(f"关键词：{item.get('keywords') or '-'}")
-            key_label.setStyleSheet("font-size:12px;color:#60A5FA;")
-            text_layout.addWidget(key_label)
-            file_label = QLabel(f"资料文件：{item.get('file_name') or '未提供文件名'}")
-            file_label.setStyleSheet("font-size:12px;color:#60A5FA;")
-            text_layout.addWidget(file_label)
-            card_layout.addLayout(text_layout, 1)
-
-            action_layout = QVBoxLayout()
-            action_layout.setSpacing(8)
-            detail_btn = QPushButton("查看接线图")
-            detail_btn.clicked.connect(lambda checked=False, current_item=dict(item): self._show_wiring_guide_detail_dialog(current_item))
-            download_btn = QPushButton("下载接线图")
-            download_btn.clicked.connect(lambda checked=False, current_item=dict(item): self._download_resource_file(current_item))
-            action_layout.addWidget(detail_btn)
-            action_layout.addWidget(download_btn)
-            action_layout.addStretch()
-            card_layout.addLayout(action_layout)
-            target_layout.addWidget(card)
+        selected_items = []
 
         def render_items():
             keyword = search_edit.text().strip()
             result_items = _filter_resource_items(items, keyword)
-            clear_layout(content_layout)
+            selected_items[:] = result_items
+            list_widget.clear()
             if keyword:
-                result_label.setText(f"接线图搜索：找到 {len(result_items)} 条结果")
+                result_label.setText(f"搜索到 {len(result_items)} 条接线图")
             else:
-                result_label.setText(f"当前共 {len(items)} 条接线图资源")
-            if not result_items:
-                empty = QLabel("未找到匹配的接线图资源")
-                empty.setStyleSheet("font-size:13px;color:#94A3B8;padding:8px 4px;")
-                content_layout.addWidget(empty)
-                content_layout.addStretch()
-                return
+                result_label.setText("请输入型号后搜索")
             for item in result_items:
-                add_card(content_layout, item)
-            content_layout.addStretch()
+                list_widget.addItem(f"{item.get('name') or '-'} | ECU: {item.get('model') or '-'} | 车型: {item.get('car_model') or '-'}")
+
+        def download_selected():
+            row = list_widget.currentRow()
+            if row < 0 or row >= len(selected_items):
+                show_message(dialog, QMessageBox.Warning, "提示", "请先选择接线图")
+                return
+            self._download_resource_file(selected_items[row])
 
         search_edit.textChanged.connect(lambda _=None: render_items())
+        list_widget.itemDoubleClicked.connect(lambda _: download_selected())
         render_items()
 
+        btn_row = QHBoxLayout()
+        btn_row.addStretch()
+        download_btn = QPushButton("下载接线图")
+        download_btn.clicked.connect(download_selected)
         close_btn = QPushButton("关闭")
         close_btn.clicked.connect(dialog.accept)
-        layout.addWidget(close_btn, 0, Qt.AlignRight)
+        btn_row.addWidget(download_btn)
+        btn_row.addWidget(close_btn)
+        layout.addLayout(btn_row)
         dialog.exec_()
 
     def _open_resource_list_dialog(self, title_text, items, search_placeholder, detail_title):
         dialog = QDialog(self)
         dialog.setWindowTitle(title_text)
         apply_logo_to_window(dialog)
-        dialog.resize(900, 700)
+        dialog.resize(820, 560)
         dialog.setStyleSheet(
             "QDialog{background:#060B16;} QLabel{color:#E5E7EB;} "
-            "QPushButton{background:#2563EB;color:white;border:none;border-radius:8px;padding:8px 16px;font-size:14px;font-weight:bold;} "
-            "QFrame{background:rgba(8,24,64,0.94);border:1px solid rgba(76,133,231,0.40);border-radius:12px;} "
-            "QLineEdit{background:rgba(3,10,28,0.96);color:#E5E7EB;border:1px solid rgba(96,165,250,0.35);border-radius:8px;padding:10px 12px;font-size:14px;}"
+            "QPushButton{background:#2563EB;color:white;border:none;border-radius:8px;padding:10px 18px;font-size:14px;font-weight:bold;} "
+            "QLineEdit{background:rgba(3,10,28,0.96);color:#E5E7EB;border:1px solid rgba(96,165,250,0.35);border-radius:8px;padding:12px 14px;font-size:18px;} "
+            "QListWidget{background:rgba(8,24,64,0.94);color:#E5E7EB;border:1px solid rgba(76,133,231,0.40);border-radius:12px;font-size:15px;} "
+            "QListWidget::item{padding:12px 14px;} QListWidget::item:selected{background:#1D4ED8;}"
         )
         layout = QVBoxLayout(dialog)
-        layout.setContentsMargins(20, 20, 20, 20)
-        layout.setSpacing(14)
+        layout.setContentsMargins(24, 24, 24, 24)
+        layout.setSpacing(16)
 
         title = QLabel(title_text)
-        title.setStyleSheet("font-size:20px;font-weight:bold;color:#93C5FD;")
+        title.setStyleSheet("font-size:24px;font-weight:bold;color:#93C5FD;")
         layout.addWidget(title)
 
         search_edit = QLineEdit(dialog)
         search_edit.setPlaceholderText(search_placeholder)
         layout.addWidget(search_edit)
 
-        result_label = QLabel("")
-        result_label.setStyleSheet("font-size:12px;color:#60A5FA;")
+        result_label = QLabel("请输入关键词后搜索")
+        result_label.setStyleSheet("font-size:14px;color:#60A5FA;")
         layout.addWidget(result_label)
 
-        scroll = QScrollArea(dialog)
-        scroll.setWidgetResizable(True)
-        scroll.setFrameShape(QFrame.NoFrame)
-        content = QWidget()
-        content_layout = QVBoxLayout(content)
-        content_layout.setContentsMargins(0, 0, 0, 0)
-        content_layout.setSpacing(12)
-        scroll.setWidget(content)
-        layout.addWidget(scroll)
+        list_widget = QListWidget(dialog)
+        layout.addWidget(list_widget)
 
-        def clear_layout(target_layout):
-            while target_layout.count():
-                child = target_layout.takeAt(0)
-                widget = child.widget()
-                nested_layout = child.layout()
-                if widget is not None:
-                    widget.deleteLater()
-                elif nested_layout is not None:
-                    clear_layout(nested_layout)
-
-        def add_resource_card(target_layout, item):
-            card = QFrame()
-            card_layout = QHBoxLayout(card)
-            card_layout.setContentsMargins(16, 14, 16, 14)
-            card_layout.setSpacing(14)
-
-            preview_label = QLabel()
-            preview_label.setFixedSize(140, 98)
-            preview_label.setAlignment(Qt.AlignCenter)
-            preview_label.setWordWrap(True)
-            preview_label.setStyleSheet("background:rgba(3,10,28,0.96);border-radius:10px;color:#94A3B8;font-size:12px;")
-            thumb = self._load_remote_pixmap(self._resource_preview_url(item))
-            if thumb and not thumb.isNull():
-                preview_label.setPixmap(thumb.scaled(140, 98, Qt.KeepAspectRatioByExpanding, Qt.SmoothTransformation))
-            else:
-                preview_label.setText("暂无预览")
-            card_layout.addWidget(preview_label)
-
-            text_layout = QVBoxLayout()
-            text_layout.setSpacing(6)
-            name = QLabel(item.get("name") or item.get("title") or "未命名资源")
-            name.setStyleSheet("font-size:15px;font-weight:bold;color:#E5E7EB;")
-            text_layout.addWidget(name)
-            desc = QLabel(item.get("description") or item.get("remark") or "")
-            desc.setWordWrap(True)
-            desc.setStyleSheet("font-size:13px;color:#CBD5E1;")
-            text_layout.addWidget(desc)
-            file_name = item.get("file_name") or ""
-            if file_name:
-                file_label = QLabel(f"资料文件：{file_name}")
-                file_label.setStyleSheet("font-size:12px;color:#60A5FA;")
-                text_layout.addWidget(file_label)
-            card_layout.addLayout(text_layout, 1)
-            action_layout = QVBoxLayout()
-            action_layout.setSpacing(8)
-            detail_btn = QPushButton("查看详情")
-            detail_btn.clicked.connect(lambda checked=False, current_item=dict(item): self._show_resource_detail_dialog(current_item, detail_title))
-            download_btn = QPushButton(item.get("button_text") or "下载到本地")
-            download_btn.clicked.connect(lambda checked=False, current_item=dict(item): self._download_resource_file(current_item))
-            action_layout.addWidget(detail_btn)
-            action_layout.addWidget(download_btn)
-            action_layout.addStretch()
-            card_layout.addLayout(action_layout)
-            target_layout.addWidget(card)
+        selected_items = []
 
         def render_items():
             keyword = search_edit.text().strip()
             result_items = _filter_resource_items(items, keyword)
-            clear_layout(content_layout)
+            selected_items[:] = result_items
+            list_widget.clear()
             if keyword:
                 result_label.setText(f"当前搜索到 {len(result_items)} 条结果")
             else:
-                result_label.setText(f"当前共 {len(items)} 条资源")
-            if not result_items:
-                empty = QLabel("未找到匹配资源")
-                empty.setStyleSheet("font-size:13px;color:#94A3B8;padding:8px 4px;")
-                content_layout.addWidget(empty)
-                content_layout.addStretch()
-                return
+                result_label.setText("请输入关键词后搜索")
             for item in result_items:
-                add_resource_card(content_layout, item)
-            content_layout.addStretch()
+                list_widget.addItem(f"{item.get('name') or item.get('title') or '-'} | 文件: {item.get('file_name') or '-'}")
+
+        def download_selected():
+            row = list_widget.currentRow()
+            if row < 0 or row >= len(selected_items):
+                show_message(dialog, QMessageBox.Warning, "提示", "请先选择文件")
+                return
+            self._download_resource_file(selected_items[row])
 
         search_edit.textChanged.connect(lambda _=None: render_items())
+        list_widget.itemDoubleClicked.connect(lambda _: download_selected())
         render_items()
 
+        btn_row = QHBoxLayout()
+        btn_row.addStretch()
+        download_btn = QPushButton("立即下载")
+        download_btn.clicked.connect(download_selected)
         close_btn = QPushButton("关闭")
         close_btn.clicked.connect(dialog.accept)
-        layout.addWidget(close_btn, 0, Qt.AlignRight)
+        btn_row.addWidget(download_btn)
+        btn_row.addWidget(close_btn)
+        layout.addLayout(btn_row)
         dialog.exec_()
 
     def open_resource_download_dialog(self):
         cfg = getattr(self, "purchase_config", {}) or {}
         downloads = _parse_config_list(cfg.get("virtual_downloads_json"))
-        self._open_resource_list_dialog("资料下载", downloads, "输入资料关键词，例如 ME7.8.8、EA211、朗逸", "资料详情")
+        downloads = [item for item in downloads if item.get("is_enabled", 1)]
+        self._open_resource_list_dialog("文件下载", downloads, "输入文件关键词，例如 ME7.8.8、EA211、朗逸", "文件详情")
+
+    def open_learning_articles_dialog(self):
+        try:
+            items = _api_request_json("/learning-articles", token=self.license_data.get("token"))
+        except Exception as exc:
+            show_message(self, QMessageBox.Warning, "提示", f"学习资料加载失败：{exc}")
+            return
+
+        dialog = QDialog(self)
+        dialog.setWindowTitle("学习资料")
+        apply_logo_to_window(dialog)
+        dialog.resize(900, 620)
+        dialog.setStyleSheet(
+            "QDialog{background:#060B16;} QLabel{color:#E5E7EB;} "
+            "QPushButton{background:#2563EB;color:white;border:none;border-radius:8px;padding:10px 18px;font-size:14px;font-weight:bold;} "
+            "QLineEdit{background:rgba(3,10,28,0.96);color:#E5E7EB;border:1px solid rgba(96,165,250,0.35);border-radius:8px;padding:12px 14px;font-size:18px;} "
+            "QListWidget{background:rgba(8,24,64,0.94);color:#E5E7EB;border:1px solid rgba(76,133,231,0.40);border-radius:12px;font-size:15px;} "
+            "QListWidget::item{padding:12px 14px;} QListWidget::item:selected{background:#1D4ED8;} "
+            "QTextBrowser{background:rgba(8,24,64,0.94);color:#E5E7EB;border:1px solid rgba(76,133,231,0.40);border-radius:12px;padding:16px;font-size:14px;}"
+        )
+        layout = QVBoxLayout(dialog)
+        layout.setContentsMargins(24, 24, 24, 24)
+        layout.setSpacing(16)
+
+        title = QLabel("学习资料")
+        title.setStyleSheet("font-size:24px;font-weight:bold;color:#93C5FD;")
+        layout.addWidget(title)
+
+        search_edit = QLineEdit(dialog)
+        search_edit.setPlaceholderText("输入学习资料标题关键词")
+        layout.addWidget(search_edit)
+
+        result_label = QLabel("请输入关键词后搜索")
+        result_label.setStyleSheet("font-size:14px;color:#60A5FA;")
+        layout.addWidget(result_label)
+
+        body_layout = QHBoxLayout()
+        body_layout.setSpacing(14)
+
+        list_widget = QListWidget(dialog)
+        list_widget.setMinimumWidth(320)
+        body_layout.addWidget(list_widget, 4)
+
+        detail_view = QTextBrowser(dialog)
+        detail_view.setOpenExternalLinks(True)
+        detail_view.setHtml("<div style='color:#93C5FD;font-size:16px;'>请选择左侧学习资料</div>")
+        body_layout.addWidget(detail_view, 6)
+
+        layout.addLayout(body_layout)
+
+        selected_items = []
+
+        def build_html(item):
+            title_text = item.get("title") or "未命名学习资料"
+            summary = item.get("summary") or ""
+            content_html = item.get("content_html") or ""
+            cover = (item.get("cover_image_url") or "").strip()
+            cover_html = ""
+            if cover:
+                resolved = _resolve_resource_url(cover)
+                cover_html = f"<div style='margin-bottom:16px;'><img src='{resolved}' style='max-width:100%;border-radius:12px;'></div>"
+            return (
+                f"<h2 style='color:#EAF4FF;margin:0 0 12px 0;'>{title_text}</h2>"
+                f"<div style='color:#94A3B8;font-size:14px;line-height:1.8;margin-bottom:14px;'>{summary}</div>"
+                f"{cover_html}"
+                f"<div style='color:#E5E7EB;font-size:14px;line-height:1.8;'>{content_html}</div>"
+            )
+
+        def render_items():
+            keyword = search_edit.text().strip().lower()
+            result_items = []
+            for item in items or []:
+                title_text = str(item.get("title") or "").lower()
+                summary_text = str(item.get("summary") or "").lower()
+                if keyword and keyword not in title_text and keyword not in summary_text:
+                    continue
+                result_items.append(item)
+            selected_items[:] = result_items
+            list_widget.clear()
+            if keyword:
+                result_label.setText(f"当前搜索到 {len(result_items)} 条学习资料")
+            else:
+                result_label.setText("请输入关键词后搜索")
+            for item in result_items:
+                list_widget.addItem(f"{item.get('title') or '-'}")
+            if result_items:
+                list_widget.setCurrentRow(0)
+                detail_view.setHtml(build_html(result_items[0]))
+            else:
+                detail_view.setHtml("<div style='color:#93C5FD;font-size:16px;'>未找到匹配的学习资料</div>")
+
+        def show_selected_detail():
+            row = list_widget.currentRow()
+            if row < 0 or row >= len(selected_items):
+                detail_view.setHtml("<div style='color:#93C5FD;font-size:16px;'>请选择左侧学习资料</div>")
+                return
+            detail_view.setHtml(build_html(selected_items[row]))
+
+        search_edit.textChanged.connect(lambda _=None: render_items())
+        list_widget.currentRowChanged.connect(lambda _=None: show_selected_detail())
+        render_items()
+
+        btn_row = QHBoxLayout()
+        btn_row.addStretch()
+        close_btn = QPushButton("关闭")
+        close_btn.clicked.connect(dialog.accept)
+        btn_row.addWidget(close_btn)
+        layout.addLayout(btn_row)
+        dialog.exec_()
 
     def open_wiring_guide_dialog(self):
         cfg = getattr(self, "purchase_config", {}) or {}
         wiring_guides = _parse_config_list(cfg.get("wiring_guides_json"))
+        wiring_guides = [item for item in wiring_guides if item.get("is_enabled", 1)]
         self._open_wiring_guide_list_dialog(wiring_guides)
 
     def open_virtual_download_dialog(self):
@@ -2722,55 +2714,85 @@ class ECUFlashWindow(QMainWindow):
             self.func_tip_label.show()
 
     def clear_function_buttons(self):
-        while self.func_buttons_layout.count():
-            item = self.func_buttons_layout.takeAt(0)
+        while self.func_content_layout.count():
+            item = self.func_content_layout.takeAt(0)
             widget = item.widget()
             if widget:
                 widget.deleteLater()
 
     def _create_function_card(self, title, is_allowed=False, on_click=None, placeholder=False):
-        button = QPushButton(title)
+        button = QToolButton()
+        button.setText(title)
         button.setCursor(Qt.PointingHandCursor if not placeholder else Qt.ArrowCursor)
-        button.setEnabled(not placeholder)
+        button.setEnabled(True)
         button.setProperty("cardAllowed", bool(is_allowed))
-        button.setMinimumHeight(108)
-        button.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
+        button.setFixedSize(scaled_px(232), scaled_px(182))
+        button.setSizePolicy(QSizePolicy.Fixed, QSizePolicy.Fixed)
+        button.setIcon(_get_function_icon(title, 88))
+        button.setIconSize(QSize(scaled_px(88), scaled_px(88)))
+        button.setToolButtonStyle(Qt.ToolButtonTextUnderIcon)
         button.setStyleSheet("""
-            QPushButton {
-                background: #FFFFFF;
-                color: #1F2937;
-                font-size: 15px;
-                font-weight: 600;
-                border: none;
-                border-radius: 14px;
-                padding: 18px 14px;
+            QToolButton {
+                background: qlineargradient(x1:0,y1:0,x2:1,y2:1,
+                    stop:0 rgba(8, 41, 108, 0.98),
+                    stop:0.55 rgba(10, 66, 162, 0.96),
+                    stop:1 rgba(6, 23, 78, 0.98));
+                color: #EAF4FF;
+                font-size: 16px;
+                font-weight: 700;
+                border: 1px solid rgba(96, 165, 250, 0.42);
+                border-radius: 18px;
+                padding: 14px 12px 12px 12px;
                 text-align: center;
-                line-height: 1.35;
+                line-height: 1.5;
             }
-            QPushButton:hover:enabled {
-                background: #F8FBFF;
-                border: 1px solid rgba(59, 130, 246, 0.28);
+            QToolButton:hover:enabled {
+                background: qlineargradient(x1:0,y1:0,x2:1,y2:1,
+                    stop:0 rgba(11, 57, 143, 1.0),
+                    stop:0.55 rgba(18, 90, 205, 0.98),
+                    stop:1 rgba(7, 34, 110, 1.0));
+                border: 1px solid rgba(125, 211, 252, 0.78);
             }
-            QPushButton:pressed:enabled {
-                background: #EEF4FF;
+            QToolButton:pressed:enabled {
+                background: qlineargradient(x1:0,y1:0,x2:1,y2:1,
+                    stop:0 rgba(7, 35, 94, 1.0),
+                    stop:0.55 rgba(9, 60, 148, 1.0),
+                    stop:1 rgba(5, 20, 68, 1.0));
             }
         """)
         if not is_allowed and not placeholder:
-            button.setStyleSheet(button.styleSheet() + "QPushButton{color:#94A3B8;background:rgba(255,255,255,0.88);border:1px solid rgba(148,163,184,0.20);} QPushButton:hover:enabled{background:rgba(255,255,255,0.92);border:1px solid rgba(245,158,11,0.34);}")
+            button.setStyleSheet(button.styleSheet() + "QToolButton{color:rgba(214,228,255,0.78);background:qlineargradient(x1:0,y1:0,x2:1,y2:1,stop:0 rgba(24,50,92,0.96),stop:0.55 rgba(28,60,108,0.94),stop:1 rgba(17,34,70,0.96));border:1px solid rgba(120,144,179,0.26);} QToolButton:hover:enabled{background:qlineargradient(x1:0,y1:0,x2:1,y2:1,stop:0 rgba(30,63,118,0.96),stop:0.55 rgba(35,75,138,0.94),stop:1 rgba(21,42,84,0.96));border:1px solid rgba(245,158,11,0.42);}")
         if not placeholder:
             effect = QGraphicsDropShadowEffect(button)
-            effect.setBlurRadius(18)
-            effect.setOffset(0, 5)
-            effect.setColor(QColor(15, 23, 42, 28))
+            effect.setBlurRadius(24)
+            effect.setOffset(0, 8)
+            effect.setColor(QColor(7, 20, 52, 78))
             button.setGraphicsEffect(effect)
+        if placeholder:
+            button.setToolTip("默认功能卡片展示")
         if on_click and not placeholder:
             button.clicked.connect(on_click)
         return button
 
+    def _append_function_row(self, cards):
+        row_widget = QWidget()
+        row_layout = QHBoxLayout(row_widget)
+        row_layout.setContentsMargins(0, 0, 0, 0)
+        row_layout.setSpacing(scaled_px(10))
+        row_layout.setAlignment(Qt.AlignLeft)
+        for card in cards:
+            row_layout.addWidget(card, 0, Qt.AlignLeft)
+        row_layout.addStretch()
+        self.func_content_layout.addWidget(row_widget)
+
+    def _append_builtin_cards(self):
+        return [self._create_function_card("接线图查询", is_allowed=True, on_click=self.open_wiring_guide_dialog)]
+
     def show_default_step3_button(self):
         self.clear_function_buttons()
-        default_btn = self._create_function_card("三项未就绪", placeholder=True)
-        self.func_buttons_layout.addWidget(default_btn, 0, 0)
+        cards = self._append_builtin_cards()
+        cards.append(self._create_function_card("三项未就绪", is_allowed=True, placeholder=True))
+        self._append_function_row(cards)
 
     def load_function_buttons(self, functions):
         self.refresh_user_permissions(silent=True)
@@ -2778,26 +2800,32 @@ class ECUFlashWindow(QMainWindow):
         self.func_tip_label.hide()
 
         if not functions or len(functions) == 0:
-            self.func_tip_label.setText("提示：该ECU暂无可用功能")
-            self.func_tip_label.show()
             self.show_default_step3_button()
             return
 
-        columns = 4
-        for index, (func_name, func_info) in enumerate(functions.items()):
+        self.func_scroll.verticalScrollBar().setValue(0)
+        cards = self._append_builtin_cards()
+
+        for func_name, func_info in functions.items():
             runtime_func_info = dict(func_info or {})
             runtime_func_info.setdefault("name", func_name)
             is_allowed = self.is_function_allowed(runtime_func_info)
-            btn = self._create_function_card(
-                func_name,
-                is_allowed=is_allowed,
-                on_click=lambda checked=False, fn=func_name, fi=runtime_func_info: self.execute_function(fn, fi),
+            cards.append(
+                self._create_function_card(
+                    func_name,
+                    is_allowed=is_allowed,
+                    on_click=lambda checked=False, fn=func_name, fi=runtime_func_info: self.execute_function(fn, fi),
+                )
             )
-            if not is_allowed:
-                btn.setToolTip("当前账号未获授权，点击可查看开通方式")
-            row = index // columns
-            col = index % columns
-            self.func_buttons_layout.addWidget(btn, row, col)
+
+        row_cards = []
+        for card in cards:
+            row_cards.append(card)
+            if len(row_cards) == 4:
+                self._append_function_row(row_cards)
+                row_cards = []
+        if row_cards:
+            self._append_function_row(row_cards)
 
     def execute_function(self, func_name, func_info):
         try:
@@ -3020,6 +3048,7 @@ class MergedMainWindow(ECUFlashWindow):
     def __init__(self, license_data):
         self.license_data = license_data
         self.allowed_function_ids = set(int(item) for item in license_data.get("permission_function_ids", []))
+        self.allowed_function_names = set(str(item).strip() for item in license_data.get("permission_function_names", []) if str(item).strip())
         self.is_admin_user = bool(license_data.get("user", {}).get("is_admin"))
         self.purchase_config = license_data.get("purchase_config") or {}
         super().__init__()
@@ -3054,7 +3083,7 @@ class MergedMainWindow(ECUFlashWindow):
 
         message_label = QLabel(message)
         message_label.setWordWrap(True)
-        message_label.setStyleSheet("font-size:14px;line-height:1.6;color:#E5E7EB;")
+        message_label.setStyleSheet("font-size:18px;line-height:1.7;color:#E5E7EB;font-weight:bold;")
         layout.addWidget(message_label)
 
         if qr_code_url:
@@ -3075,25 +3104,6 @@ class MergedMainWindow(ECUFlashWindow):
             qr_label.setStyleSheet("background:#FFFFFF;border-radius:16px;padding:16px;color:#111827;")
             layout.addWidget(qr_label)
 
-        if contact:
-            contact_label = QLabel(f"联系备注：{contact}")
-            contact_label.setWordWrap(True)
-            contact_label.setStyleSheet("font-size:14px;color:#CBD5E1;")
-            layout.addWidget(contact_label)
-
-        action_row = QHBoxLayout()
-        action_row.setSpacing(12)
-        if qr_code_url:
-            copy_qr_btn = QPushButton("复制收款码链接")
-            copy_qr_btn.clicked.connect(lambda: _copy_url_to_clipboard(qr_code_url))
-            action_row.addWidget(copy_qr_btn)
-        if contact:
-            copy_contact_btn = QPushButton("复制联系备注")
-            copy_contact_btn.clicked.connect(lambda: _copy_text_to_clipboard(contact))
-            action_row.addWidget(copy_contact_btn)
-        if action_row.count() > 0:
-            layout.addLayout(action_row)
-
         layout.addStretch()
         close_btn = QPushButton("我知道了")
         close_btn.clicked.connect(dialog.accept)
@@ -3109,8 +3119,11 @@ class MergedMainWindow(ECUFlashWindow):
             self.license_data["user"] = user
             self.license_data["name"] = user.get("name") or user.get("phone") or self.license_data.get("name") or "未命名用户"
             self.is_admin_user = bool(user.get("is_admin"))
-            self.allowed_function_ids = fetch_my_permissions(token)
+            permissions = fetch_my_permissions(token)
+            self.allowed_function_ids = permissions["ids"]
+            self.allowed_function_names = permissions["names"]
             self.license_data["permission_function_ids"] = sorted(self.allowed_function_ids)
+            self.license_data["permission_function_names"] = sorted(self.allowed_function_names)
             try:
                 self.purchase_config = fetch_purchase_config(token)
                 self.license_data["purchase_config"] = self.purchase_config
@@ -3121,7 +3134,7 @@ class MergedMainWindow(ECUFlashWindow):
                 if self.is_admin_user:
                     self.add_operation_log("权限已刷新：管理员，已开放全部功能")
                 else:
-                    self.add_operation_log(f"权限已刷新：已授权功能 {len(self.allowed_function_ids)} 项")
+                    self.add_operation_log(f"权限已刷新：已授权功能 {len(self.allowed_function_names)} 项")
             return True
         except Exception as exc:
             if not silent:
@@ -3136,6 +3149,8 @@ class MergedMainWindow(ECUFlashWindow):
         func_name = str(func_info.get("name") or func_info.get("function_name") or "").strip()
         free_names = set(self.purchase_config.get("free_feature_names") or [])
         if func_name and func_name in free_names:
+            return True
+        if func_name and func_name in self.allowed_function_names:
             return True
         function_id = func_info.get("function_id")
         if function_id is None:
@@ -3183,6 +3198,8 @@ class MergedMainWindow(ECUFlashWindow):
         notice_text = str(cfg.get("update_notice") or "").strip()
         if not latest_version or not notice_text:
             return False
+        if latest_version == str(APP_VERSION).strip():
+            return False
         return latest_version != str(self.license_data.get("last_seen_update_version") or "").strip()
 
     def _patch_runtime_ui(self):
@@ -3211,12 +3228,13 @@ class MergedMainWindow(ECUFlashWindow):
         if self.is_admin_user:
             self.add_operation_log("权限状态：管理员，已开放全部功能")
         else:
-            self.add_operation_log(f"权限状态：已授权功能 {len(self.allowed_function_ids)} 项")
+            self.add_operation_log(f"权限状态：已授权功能 {len(self.allowed_function_names)} 项")
         if str((self.purchase_config or {}).get("force_update", "0")) == "1":
             self.add_operation_log("更新状态：当前版本被标记为强制更新")
             show_message(self, QMessageBox.Warning, "强制更新", (self.purchase_config or {}).get("update_notice") or "当前版本需要强制更新，请联系管理员获取最新版。")
         elif self._should_show_update_notice_once():
-            self.add_operation_log("更新状态：发现新版本公告，首次提醒")
+            latest_version = str((self.purchase_config or {}).get("latest_version") or "").strip()
+            self.add_operation_log(f"更新状态：发现新版本公告 {latest_version}，首次提醒")
             self.show_log_dialog(auto_open=True)
 
     def open_checksum_dialog(self):

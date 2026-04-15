@@ -103,6 +103,21 @@ DDL_STATEMENTS = [
     ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
     """,
     """
+    CREATE TABLE IF NOT EXISTS app_learning_article (
+        id BIGINT PRIMARY KEY AUTO_INCREMENT,
+        title VARCHAR(255) NOT NULL,
+        summary TEXT NULL,
+        cover_image_url VARCHAR(512) NULL,
+        content_html LONGTEXT NULL,
+        sort_order INT NOT NULL DEFAULT 0,
+        is_enabled TINYINT(1) NOT NULL DEFAULT 1,
+        created_at DATETIME NOT NULL,
+        updated_at DATETIME NOT NULL,
+        INDEX idx_app_learning_article_enabled (is_enabled),
+        INDEX idx_app_learning_article_sort (sort_order)
+    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
+    """,
+    """
     CREATE TABLE IF NOT EXISTS ecu_car_series (
         id BIGINT PRIMARY KEY AUTO_INCREMENT,
         name VARCHAR(128) NOT NULL,
@@ -323,14 +338,41 @@ def _seed_wiring_guides(conn) -> None:
             """
         ),
         {
-            "name": "示例接线图",
-            "model": "ME7.8.8",
-            "car_model": "朗逸 1.6",
-            "keywords": "ME788,EA211,朗逸",
-            "description": "默认占位接线图资源，可在后台上传真实文件后替换",
+            "name": "测试接线图",
+            "model": "ACDELCO_E84_IROM_MPC5676_BENCH_GM",
+            "car_model": "测试车型",
+            "keywords": "1234,12345,ACDELCO,E84,MPC5676,GM",
+            "description": "默认测试接线图，可在后台继续新增或替换正式文件。",
             "preview_image_url": "",
-            "file_name": "example-wiring.pdf",
-            "file_url": "https://example.com/wiring.pdf",
+            "file_name": "ACDELCO_E84_IROM_MPC5676_BENCH_GM.pdf",
+            "file_url": "https://downloadcenter1.cairocar4u.com/ecu-pinout/ACDELCO_E84_IROM_MPC5676_BENCH_GM.pdf",
+            "created_at": now,
+            "updated_at": now,
+        },
+    )
+
+
+def _seed_learning_articles(conn) -> None:
+    exists = conn.execute(text("SELECT id FROM app_learning_article LIMIT 1")).mappings().first()
+    if exists:
+        return
+    now = now_str()
+    conn.execute(
+        text(
+            """
+            INSERT INTO app_learning_article (
+                title, summary, cover_image_url, content_html, sort_order, is_enabled, created_at, updated_at
+            )
+            VALUES (
+                :title, :summary, :cover_image_url, :content_html, 1, 1, :created_at, :updated_at
+            )
+            """
+        ),
+        {
+            "title": "示例学习资料",
+            "summary": "这里可以发布图文文章，供前端用户直接查看学习。",
+            "cover_image_url": "",
+            "content_html": "<h2>示例学习资料</h2><p>后台可新增图文文章，前端在学习资料模块查看。</p>",
             "created_at": now,
             "updated_at": now,
         },
@@ -349,6 +391,11 @@ def init_db() -> None:
             "ALTER TABLE app_user ADD COLUMN approval_note VARCHAR(255) NULL",
             "ALTER TABLE app_user ADD INDEX idx_app_user_device_id (device_id)",
             "ALTER TABLE app_wiring_guide ADD COLUMN preview_image_url VARCHAR(512) NULL",
+            "ALTER TABLE app_learning_article ADD COLUMN summary TEXT NULL",
+            "ALTER TABLE app_learning_article ADD COLUMN cover_image_url VARCHAR(512) NULL",
+            "ALTER TABLE app_learning_article ADD COLUMN content_html LONGTEXT NULL",
+            "ALTER TABLE app_learning_article ADD COLUMN sort_order INT NOT NULL DEFAULT 0",
+            "ALTER TABLE app_learning_article ADD COLUMN is_enabled TINYINT(1) NOT NULL DEFAULT 1",
         ]
         for sql in alter_statements:
             try:
@@ -381,6 +428,7 @@ def init_db() -> None:
         _seed_ecu_data(conn)
         _seed_app_settings(conn)
         _seed_wiring_guides(conn)
+        _seed_learning_articles(conn)
 
     try:
         ensure_bucket_exists()

@@ -1,4 +1,4 @@
-name: build-windows
+name: build-desktop
 
 on:
   push:
@@ -7,7 +7,20 @@ on:
 
 jobs:
   build:
-    runs-on: windows-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: windows-latest
+            artifact_name: ECUFlash-windows
+            output_file: dist/ECUFlash-windows.zip
+          - os: macos-latest
+            artifact_name: ECUFlash-macos
+            output_file: dist/ECUFlash-macos.zip
+          - os: ubuntu-latest
+            artifact_name: ECUFlash-linux
+            output_file: dist/ECUFlash-linux.tar.gz
+    runs-on: ${{ matrix.os }}
 
     steps:
       - name: Checkout
@@ -18,23 +31,78 @@ jobs:
         with:
           python-version: '3.9'
 
+      - name: Install Linux runtime libs
+        if: matrix.os == 'ubuntu-latest'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libegl1 libgl1 libxkbcommon-x11-0 libxcb-xinerama0
+
       - name: Install dependencies
         run: |
           python -m pip install --upgrade pip
           pip install -r requirements.txt
           pip install PyQt5 pyinstaller
 
-      - name: Build exe
+      - name: Build desktop package
         run: |
           pyinstaller --noconfirm --clean --windowed --name ECUFlash --hidden-import PyQt5.sip frontend.py
 
-      - name: Compress output
+      - name: Pack Windows artifact
+        if: matrix.os == 'windows-latest'
         shell: pwsh
         run: |
           Compress-Archive -Path dist/ECUFlash/* -DestinationPath dist/ECUFlash-windows.zip -Force
 
+      - name: Pack macOS artifact
+        if: matrix.os == 'macos-latest'
+        run: |
+          ditto -c -k --sequesterRsrc --keepParent dist/ECUFlash.app dist/ECUFlash-macos.zip
+
+      - name: Pack Linux artifact
+        if: matrix.os == 'ubuntu-latest'
+        run: |
+          tar -czf dist/ECUFlash-linux.tar.gz -C dist ECUFlash
+
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
+          name: ${{ matrix.artifact_name }}
+          path: ${{ matrix.output_file }}
+
+  release:
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Download Windows artifact
+        uses: actions/download-artifact@v4
+        with:
           name: ECUFlash-windows
-          path: dist/ECUFlash-windows.zip
+          path: release-assets
+
+      - name: Download macOS artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: ECUFlash-macos
+          path: release-assets
+
+      - name: Download Linux artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: ECUFlash-linux
+          path: release-assets
+
+      - name: Publish latest release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: latest-build
+          name: 最新桌面版构建
+          prerelease: true
+          make_latest: true
+          overwrite_files: true
+          generate_release_notes: true
+          files: |
+            release-assets/ECUFlash-windows.zip
+            release-assets/ECUFlash-macos.zip
+            release-assets/ECUFlash-linux.tar.gz

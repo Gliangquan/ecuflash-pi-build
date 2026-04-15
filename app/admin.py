@@ -56,7 +56,7 @@ class AdminAssetSaveIn(BaseModel):
     category: str = Field(default="manual", max_length=32)
     summary: str = Field(default="")
     image_url: str = Field(default="", max_length=512)
-    download_text: str = Field(default="立即查看", max_length=64)
+    download_text: str = Field(default="立即下载", max_length=64)
     sort_order: int = Field(default=0)
     is_enabled: int = Field(default=1)
     file_name: str = Field(default="", max_length=255)
@@ -80,6 +80,15 @@ class WiringGuideSaveIn(BaseModel):
     file_url: str = Field(default="", max_length=512)
     content_type: str = Field(default="", max_length=128)
     file_size: int = Field(default=0, ge=0)
+
+
+class LearningArticleSaveIn(BaseModel):
+    title: str = Field(default="", max_length=255)
+    summary: str = Field(default="")
+    cover_image_url: str = Field(default="", max_length=512)
+    content_html: str = Field(default="")
+    sort_order: int = Field(default=0)
+    is_enabled: int = Field(default=1)
 
 
 def _admin_guard(user: dict = Depends(get_current_user)) -> dict:
@@ -126,7 +135,7 @@ def _guess_download_text(content_type: str, file_name: str, title: str) -> str:
         return "查看文档"
     if any(file_lower.endswith(ext) for ext in (".zip", ".rar", ".7z")):
         return "下载资料包"
-    return "立即查看" if title_text else "立即打开"
+    return "立即下载" if title_text else "立即打开"
 
 
 def _normalize_admin_asset_row(row: dict) -> dict:
@@ -172,6 +181,15 @@ def _normalize_wiring_guide_row(row: dict) -> dict:
     item["name"] = item.get("title") or (item.get("name") or "")
     item["description"] = item.get("summary") or (item.get("description") or "")
     item["preview_image_url"] = item.get("image_url") or ""
+    return item
+
+
+def _normalize_learning_article_row(row: dict) -> dict:
+    item = dict(row)
+    item["summary"] = (item.get("summary") or "").strip()
+    item["cover_image_url"] = (item.get("cover_image_url") or "").strip()
+    item["content_html"] = item.get("content_html") or ""
+    item["is_enabled"] = 1 if item.get("is_enabled") else 0
     return item
 
 
@@ -246,7 +264,14 @@ def dashboard(_: dict = Depends(_admin_guard)) -> dict:
             text("SELECT COUNT(*) AS c FROM app_user WHERE status = 'enabled'")
         ).mappings().first()["c"]
         total_permissions = conn.execute(
-            text("SELECT COUNT(*) AS c FROM app_user_function_permission WHERE status = 'enabled'")
+            text(
+                """
+                SELECT COUNT(DISTINCT f.name) AS c
+                FROM app_user_function_permission p
+                LEFT JOIN ecu_function f ON f.id = p.function_id
+                WHERE p.status = 'enabled'
+                """
+            )
         ).mappings().first()["c"]
         expiring_soon = conn.execute(
             text(
@@ -307,11 +332,13 @@ def list_users(_: dict = Depends(_admin_guard)) -> dict:
             u.device_bound_at,
             u.created_at,
             u.last_login_at,
-            COUNT(p.id) AS permission_count,
+            COUNT(DISTINCT f.name) AS permission_count,
             MAX(p.end_at) AS permission_end_at
         FROM app_user u
         LEFT JOIN app_user_function_permission p
           ON p.user_id = u.id AND p.status = 'enabled'
+        LEFT JOIN ecu_function f
+          ON f.id = p.function_id
         GROUP BY u.id, u.phone, u.name, u.status, u.approval_note, u.is_admin, u.device_id, u.device_name, u.device_bound_at, u.created_at, u.last_login_at
         ORDER BY u.id DESC
         """
@@ -596,61 +623,26 @@ def reset_user_password(
 @router.get("/permission-tree")
 def permission_tree(_: dict = Depends(_admin_guard)) -> dict:
     with get_conn() as conn:
-        cars = conn.execute(
-            text(
-                """
-                SELECT id, name, sort_order
-                FROM ecu_car_series
-                WHERE is_enabled = 1
-                ORDER BY sort_order ASC, id ASC
-                """
-            )
-        ).mappings().all()
-        models = conn.execute(
-            text(
-                """
-                SELECT id, car_series_id, name, sort_order
-                FROM ecu_model
-                WHERE is_enabled = 1
-                ORDER BY sort_order ASC, id ASC
-                """
-            )
-        ).mappings().all()
         functions = conn.execute(
             text(
                 """
-                SELECT id, ecu_model_id, name, success_msg, sort_order
+                SELECT MIN(id) AS id, name, MAX(success_msg) AS success_msg, MIN(sort_order) AS sort_order
                 FROM ecu_function
                 WHERE is_enabled = 1
-                ORDER BY sort_order ASC, id ASC
+                GROUP BY name
+                ORDER BY MIN(sort_order) ASC, MIN(id) ASC
                 """
             )
         ).mappings().all()
-
-    model_by_car = {}
-    for model in models:
-        model_by_car.setdefault(model["car_series_id"], []).append(dict(model))
-
-    function_by_model = {}
-    for func in functions:
-        function_by_model.setdefault(func["ecu_model_id"], []).append(dict(func))
-
-    items = []
-    for car in cars:
-        car_item = {"id": f"car-{car['id']}", "label": car["name"], "type": "car", "children": []}
-        for model in model_by_car.get(car["id"], []):
-            model_item = {"id": f"model-{model['id']}", "label": model["name"], "type": "model", "children": []}
-            for func in function_by_model.get(model["id"], []):
-                model_item["children"].append(
-                    {
-                        "id": func["id"],
-                        "label": func["name"],
-                        "type": "function",
-                        "success_msg": func["success_msg"],
-                    }
-                )
-            car_item["children"].append(model_item)
-        items.append(car_item)
+    items = [
+        {
+            "id": row["id"],
+            "label": row["name"],
+            "type": "function",
+            "success_msg": row["success_msg"],
+        }
+        for row in functions
+    ]
     return {"items": items}
 
 
@@ -658,10 +650,11 @@ def permission_tree(_: dict = Depends(_admin_guard)) -> dict:
 def user_permissions(user_id: int, _: dict = Depends(_admin_guard)) -> dict:
     sql = text(
         """
-        SELECT function_id, end_at, status
-        FROM app_user_function_permission
-        WHERE user_id = :user_id
-        ORDER BY function_id ASC
+        SELECT p.function_id, f.name AS function_name, p.end_at, p.status
+        FROM app_user_function_permission p
+        LEFT JOIN ecu_function f ON f.id = p.function_id
+        WHERE p.user_id = :user_id
+        ORDER BY p.function_id ASC
         """
     )
     with get_conn() as conn:
@@ -678,12 +671,29 @@ def save_permissions(payload: PermissionSaveIn, admin: dict = Depends(_admin_gua
         ).mappings().first()
         if not user:
             raise HTTPException(status_code=404, detail="user not found")
+        selected_ids = sorted(set(payload.function_ids))
+        selected_names = []
+        if selected_ids:
+            placeholders = ", ".join(f":id_{index}" for index in range(len(selected_ids)))
+            selected_rows = conn.execute(
+                text(f"SELECT DISTINCT name FROM ecu_function WHERE id IN ({placeholders})"),
+                {f"id_{index}": value for index, value in enumerate(selected_ids)},
+            ).mappings().all()
+            selected_names = [row["name"] for row in selected_rows if row.get("name")]
+        expanded_ids = []
+        if selected_names:
+            placeholders = ", ".join(f":name_{index}" for index in range(len(selected_names)))
+            expanded_rows = conn.execute(
+                text(f"SELECT id FROM ecu_function WHERE is_enabled = 1 AND name IN ({placeholders}) ORDER BY id ASC"),
+                {f"name_{index}": value for index, value in enumerate(selected_names)},
+            ).mappings().all()
+            expanded_ids = [int(row["id"]) for row in expanded_rows]
         now = now_str()
         conn.execute(
             text("DELETE FROM app_user_function_permission WHERE user_id = :user_id"),
             {"user_id": payload.user_id},
         )
-        for function_id in sorted(set(payload.function_ids)):
+        for function_id in expanded_ids:
             conn.execute(
                 text(
                     """
@@ -711,12 +721,12 @@ def save_permissions(payload: PermissionSaveIn, admin: dict = Depends(_admin_gua
                 "user_id": admin["id"],
                 "actor_name": admin["name"],
                 "target_id": str(payload.user_id),
-                "detail": f"function_count={len(set(payload.function_ids))};end_at={payload.end_at}",
+                "detail": f"function_count={len(selected_names)};expanded_count={len(expanded_ids)};end_at={payload.end_at}",
                 "created_at": now,
             },
         )
         conn.commit()
-    return {"ok": True, "count": len(set(payload.function_ids))}
+    return {"ok": True, "count": len(selected_names)}
 
 
 @router.get("/purchase-config")
@@ -903,6 +913,156 @@ def create_wiring_guide(payload: WiringGuideSaveIn, admin: dict = Depends(_admin
         )
         conn.commit()
     return {"ok": True, "id": guide_id}
+
+
+@router.get("/learning-articles")
+def list_learning_articles(_: dict = Depends(_admin_guard)) -> dict:
+    with get_conn() as conn:
+        rows = conn.execute(
+            text(
+                """
+                SELECT id, title, summary, cover_image_url, content_html, sort_order, is_enabled, created_at, updated_at
+                FROM app_learning_article
+                ORDER BY sort_order ASC, id DESC
+                """
+            )
+        ).mappings().all()
+    return {"items": [_normalize_learning_article_row(dict(row)) for row in rows]}
+
+
+@router.post("/learning-articles")
+def create_learning_article(payload: LearningArticleSaveIn, admin: dict = Depends(_admin_guard)) -> dict:
+    title = payload.title.strip()
+    if not title:
+        raise HTTPException(status_code=400, detail="学习资料标题不能为空")
+    now = now_str()
+    with get_conn() as conn:
+        conn.execute(
+            text(
+                """
+                INSERT INTO app_learning_article (
+                    title, summary, cover_image_url, content_html, sort_order, is_enabled, created_at, updated_at
+                ) VALUES (
+                    :title, :summary, :cover_image_url, :content_html, :sort_order, :is_enabled, :created_at, :updated_at
+                )
+                """
+            ),
+            {
+                "title": title,
+                "summary": payload.summary,
+                "cover_image_url": payload.cover_image_url.strip(),
+                "content_html": payload.content_html,
+                "sort_order": payload.sort_order,
+                "is_enabled": 1 if payload.is_enabled else 0,
+                "created_at": now,
+                "updated_at": now,
+            },
+        )
+        article_id = conn.execute(text("SELECT LAST_INSERT_ID() AS id")).mappings().first()["id"]
+        conn.execute(
+            text(
+                """
+                INSERT INTO app_operation_log (user_id, actor_name, action, target_type, target_id, detail, created_at)
+                VALUES (:user_id, :actor_name, 'admin_create_learning_article', 'app_learning_article', :target_id, :detail, :created_at)
+                """
+            ),
+            {
+                "user_id": admin["id"],
+                "actor_name": admin["name"],
+                "target_id": str(article_id),
+                "detail": f"title={title}",
+                "created_at": now,
+            },
+        )
+        conn.commit()
+    return {"ok": True, "id": article_id}
+
+
+@router.put("/learning-articles/{article_id}")
+def update_learning_article(article_id: int, payload: LearningArticleSaveIn, admin: dict = Depends(_admin_guard)) -> dict:
+    title = payload.title.strip()
+    if not title:
+        raise HTTPException(status_code=400, detail="学习资料标题不能为空")
+    now = now_str()
+    with get_conn() as conn:
+        existing = conn.execute(
+            text("SELECT id FROM app_learning_article WHERE id = :id LIMIT 1"),
+            {"id": article_id},
+        ).mappings().first()
+        if not existing:
+            raise HTTPException(status_code=404, detail="学习资料不存在")
+        conn.execute(
+            text(
+                """
+                UPDATE app_learning_article
+                SET title = :title,
+                    summary = :summary,
+                    cover_image_url = :cover_image_url,
+                    content_html = :content_html,
+                    sort_order = :sort_order,
+                    is_enabled = :is_enabled,
+                    updated_at = :updated_at
+                WHERE id = :id
+                """
+            ),
+            {
+                "id": article_id,
+                "title": title,
+                "summary": payload.summary,
+                "cover_image_url": payload.cover_image_url.strip(),
+                "content_html": payload.content_html,
+                "sort_order": payload.sort_order,
+                "is_enabled": 1 if payload.is_enabled else 0,
+                "updated_at": now,
+            },
+        )
+        conn.execute(
+            text(
+                """
+                INSERT INTO app_operation_log (user_id, actor_name, action, target_type, target_id, detail, created_at)
+                VALUES (:user_id, :actor_name, 'admin_update_learning_article', 'app_learning_article', :target_id, :detail, :created_at)
+                """
+            ),
+            {
+                "user_id": admin["id"],
+                "actor_name": admin["name"],
+                "target_id": str(article_id),
+                "detail": f"title={title}",
+                "created_at": now,
+            },
+        )
+        conn.commit()
+    return {"ok": True}
+
+
+@router.delete("/learning-articles/{article_id}")
+def delete_learning_article(article_id: int, admin: dict = Depends(_admin_guard)) -> dict:
+    with get_conn() as conn:
+        existing = conn.execute(
+            text("SELECT id, title FROM app_learning_article WHERE id = :id LIMIT 1"),
+            {"id": article_id},
+        ).mappings().first()
+        if not existing:
+            raise HTTPException(status_code=404, detail="学习资料不存在")
+        conn.execute(text("DELETE FROM app_learning_article WHERE id = :id"), {"id": article_id})
+        now = now_str()
+        conn.execute(
+            text(
+                """
+                INSERT INTO app_operation_log (user_id, actor_name, action, target_type, target_id, detail, created_at)
+                VALUES (:user_id, :actor_name, 'admin_delete_learning_article', 'app_learning_article', :target_id, :detail, :created_at)
+                """
+            ),
+            {
+                "user_id": admin["id"],
+                "actor_name": admin["name"],
+                "target_id": str(article_id),
+                "detail": f"title={existing['title']}",
+                "created_at": now,
+            },
+        )
+        conn.commit()
+    return {"ok": True}
 
 
 @router.put("/wiring-guides/{guide_id}")

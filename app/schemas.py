@@ -65,6 +65,14 @@ class AppWiringGuideOut(BaseModel):
     url: Optional[str] = None
 
 
+class LearningArticleOut(BaseModel):
+    id: int
+    title: str
+    summary: Optional[str] = None
+    cover_image_url: Optional[str] = None
+    content_html: Optional[str] = None
+
+
 class HealthOut(BaseModel):
     status: str
     app: str

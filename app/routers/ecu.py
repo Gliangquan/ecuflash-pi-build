@@ -15,6 +15,7 @@ from app.schemas import (
     FunctionOut,
     FunctionPatchesOut,
     IdentifyRuleOut,
+    LearningArticleOut,
     PatchOut,
 )
 from app.settings import settings
@@ -38,11 +39,33 @@ def _get_user_allowed_function_ids(user_id: int) -> set[int]:
     return {int(row["function_id"]) for row in rows}
 
 
+def _get_user_allowed_function_names(user_id: int) -> set[str]:
+    sql = text(
+        """
+        SELECT DISTINCT f.name
+        FROM app_user_function_permission p
+        LEFT JOIN ecu_function f ON f.id = p.function_id
+        WHERE p.user_id = :user_id
+          AND p.status = 'enabled'
+          AND (p.end_at IS NULL OR p.end_at > NOW())
+          AND f.name IS NOT NULL
+        """
+    )
+    with get_conn() as conn:
+        rows = conn.execute(sql, {"user_id": user_id}).mappings().all()
+    return {str(row["name"]).strip() for row in rows if row.get("name")}
+
+
 def _ensure_function_allowed(user: dict, function_id: int) -> None:
     if user.get("is_admin"):
         return
-    allowed_ids = _get_user_allowed_function_ids(int(user["id"]))
-    if int(function_id) not in allowed_ids:
+    sql = text("SELECT name FROM ecu_function WHERE id = :id LIMIT 1")
+    with get_conn() as conn:
+        row = conn.execute(sql, {"id": function_id}).mappings().first()
+    if not row or not row.get("name"):
+        raise HTTPException(status_code=403, detail="function not allowed")
+    allowed_names = _get_user_allowed_function_names(int(user["id"]))
+    if str(row["name"]).strip() not in allowed_names:
         raise HTTPException(status_code=403, detail="function not allowed")
 
 
@@ -124,8 +147,8 @@ def list_functions(ecu_model_id: int, user: dict = Depends(get_current_user)) ->
         rows = conn.execute(sql, {"ecu_model_id": ecu_model_id}).mappings().all()
     if user.get("is_admin"):
         return [FunctionOut(**row) for row in rows]
-    allowed_ids = _get_user_allowed_function_ids(int(user["id"]))
-    return [FunctionOut(**row) for row in rows if int(row["id"]) in allowed_ids]
+    allowed_names = _get_user_allowed_function_names(int(user["id"]))
+    return [FunctionOut(**row) for row in rows if str(row["name"]).strip() in allowed_names]
 
 
 @router.get("/functions/{function_id}/patches", response_model=FunctionPatchesOut)
@@ -228,7 +251,7 @@ def _normalize_virtual_assets_for_client(raw_text: str, keyword: str = "") -> li
             "description": raw.get("summary") or raw.get("description") or "",
             "remark": raw.get("summary") or raw.get("description") or "",
             "image_url": raw.get("image_url") or "",
-            "button_text": raw.get("download_text") or raw.get("button_text") or "立即查看",
+            "button_text": raw.get("download_text") or raw.get("button_text") or "立即下载",
             "file_name": raw.get("file_name") or "",
             "keywords": raw.get("keywords") or "",
             "url": url,
@@ -306,7 +329,7 @@ def _build_runtime_dataset_payload(user: dict) -> dict:
         patches = conn.execute(patches_sql).mappings().all()
         cpus = conn.execute(cpu_sql).mappings().all()
 
-    allowed_ids = None if user.get("is_admin") else _get_user_allowed_function_ids(int(user["id"]))
+    allowed_names = None if user.get("is_admin") else _get_user_allowed_function_names(int(user["id"]))
 
     model_by_car: dict[int, list[dict]] = {}
     for row in models:
@@ -326,7 +349,7 @@ def _build_runtime_dataset_payload(user: dict) -> dict:
 
     func_by_model: dict[int, list[dict]] = {}
     for row in functions:
-        if allowed_ids is not None and int(row["id"]) not in allowed_ids:
+        if allowed_names is not None and str(row["name"]).strip() not in allowed_names:
             continue
         func_by_model.setdefault(row["ecu_model_id"], []).append(
             {
@@ -439,7 +462,7 @@ def get_purchase_config(user: dict = Depends(get_current_user)) -> dict:
         "message": "当前功能尚未开通，请扫码付款后联系管理员授权。",
         "qr_code_url": "",
         "contact": "",
-        "free_feature_names": ["接线图查询"],
+        "free_feature_names": ["接线图查询", "资料下载", "文件下载", "学习资料"],
     }
     with get_conn() as conn:
         rows = conn.execute(
@@ -547,6 +570,31 @@ def get_file_proxy(object_key: str):
     return Response(content=content, media_type=content_type)
 
 
+@router.get("/learning-articles", response_model=list[LearningArticleOut])
+def list_learning_articles() -> list[LearningArticleOut]:
+    with get_conn() as conn:
+        rows = conn.execute(
+            text(
+                """
+                SELECT id, title, summary, cover_image_url, content_html
+                FROM app_learning_article
+                WHERE is_enabled = 1
+                ORDER BY sort_order ASC, id DESC
+                """
+            )
+        ).mappings().all()
+    return [
+        LearningArticleOut(
+            id=row["id"],
+            title=row.get("title") or "",
+            summary=row.get("summary") or None,
+            cover_image_url=row.get("cover_image_url") or None,
+            content_html=row.get("content_html") or None,
+        )
+        for row in rows
+    ]
+
+
 @router.get("/wiring-guides/{guide_id}/download")
 def download_wiring_guide(guide_id: int):
     with get_conn() as conn:
@@ -558,9 +606,7 @@ def download_wiring_guide(guide_id: int):
         raise HTTPException(status_code=404, detail="wiring guide not found")
     object_key = (row.get("object_key") or "").strip()
     if object_key:
-        from app.storage import get_object_content
-        content, content_type = get_object_content(object_key)
-        return Response(content=content, media_type=content_type)
+        return RedirectResponse(f"/api/v1/files/{quote(object_key, safe='')}", status_code=307)
     file_url = (row.get("file_url") or "").strip()
     if not file_url:
         raise HTTPException(status_code=404, detail="wiring guide file not found")
