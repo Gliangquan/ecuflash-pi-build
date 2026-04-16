@@ -48,7 +48,7 @@ def _resource_path(*parts):
     return os.path.join(base_dir, *parts)
 
 
-API_BASE_URL = os.environ.get("ECUFLASH_API_BASE_URL", "http://107.148.176.142:8000/api/v1").rstrip("/")
+API_BASE_URL = os.environ.get("ECUFLASH_API_BASE_URL", "http://127.0.0.1:8000/api/v1").rstrip("/")
 APP_VERSION = "1.0.0"
 APP_LOGO_FILE = "icon.jpg"
 APP_LOGO_URL = ""
@@ -64,11 +64,13 @@ _APP_LOGO_ICON_CACHE = None
 _FUNCTION_ICON_CACHE = {}
 _FUNCTION_ICON_NAME_MAP = {
     "三项未就绪": "repair-order.png",
+    "三项未就绪修复": "repair-order.png",
     "接线图查询": "dedicated-line.png",
     "文件下载": "file-download.png",
     "学习资料": "file-download.png",
     "怠速调整": "system-settings.png",
     "防盗关闭": "security-shield.png",
+    "关闭防盗": "security-shield.png",
     "无防盗": "security-shield.png",
 }
 
@@ -134,18 +136,17 @@ def init_ui_scaling(app):
 def _get_app_logo_pixmap(size=28):
     global _APP_LOGO_PIXMAP_CACHE
     if _APP_LOGO_PIXMAP_CACHE is None:
-        # Prefer remote logo first.
-        try:
-            request = urllib.request.Request(APP_LOGO_URL, headers={"Accept": "image/*"})
-            with urllib.request.urlopen(request, timeout=5) as response:
-                data = response.read()
-            remote_pixmap = QPixmap()
-            if remote_pixmap.loadFromData(data):
-                _APP_LOGO_PIXMAP_CACHE = remote_pixmap
-        except Exception:
-            _APP_LOGO_PIXMAP_CACHE = None
+        if APP_LOGO_URL:
+            try:
+                request = urllib.request.Request(APP_LOGO_URL, headers={"Accept": "image/*"})
+                with urllib.request.urlopen(request, timeout=5) as response:
+                    data = response.read()
+                remote_pixmap = QPixmap()
+                if remote_pixmap.loadFromData(data):
+                    _APP_LOGO_PIXMAP_CACHE = remote_pixmap
+            except Exception:
+                _APP_LOGO_PIXMAP_CACHE = None
 
-        # Fallback to local logo file.
         if _APP_LOGO_PIXMAP_CACHE is None:
             logo_path = _resource_path(APP_LOGO_FILE)
             if os.path.exists(logo_path):
@@ -246,7 +247,13 @@ def create_branded_message_box(parent=None):
     icon = _get_app_logo_icon()
     if icon:
         message_box.setWindowIcon(icon)
+    message_box.setStyleSheet(
+        "QMessageBox{background:#111827;} "
+        "QLabel{color:#F3F4F6; font-size:14px;} "
+        "QPushButton{color:white; background:#2563EB; border:none; border-radius:6px; min-width:96px; padding:6px 12px;}"
+    )
     return message_box
+
 
 def configure_qt_runtime():
     if not sys.platform.startswith("win"):
@@ -269,535 +276,148 @@ def configure_qt_runtime():
             QCoreApplication.addLibraryPath(plugin_root)
         break
 
-
 CAR_ECU_MAP = {}
-
-
-ECU_CPU_MAP = {}
-
-
 ECU_DATABASE = []
+ECU_CPU_MAP = {}
+CHECKSUM_ADDRESSES = {}
+CPU_DISPLAY_TO_KEY = {}
+ALL_FUNCTION_NAMES = []
 
 
 def calculate_checksum(original_data, modified_data, offset):
-    try:
-        if len(original_data) != len(modified_data):
-            return False, None
-        def sum16(data, skip_start, skip_len):
-            s = 0
-            for i in range(0, len(data), 2):
-                if skip_start <= i < skip_start + skip_len: continue
-                if i + 1 >= len(data): w = data[i] << 8
-                else: w = (data[i] << 8) | data[i + 1]
-                s = (s + w) & 0xFFFF
-            return s
-        sum_ori = sum16(original_data, offset, 2)
-        orig_cs = struct.unpack('>H', original_data[offset:offset + 2])[0]
-        init = (orig_cs - sum_ori) & 0xFFFF
-        sum_mod = sum16(modified_data, offset, 2)
-        new_cs = (sum_mod + init) & 0xFFFF
-        modified_data[offset:offset + 2] = struct.pack('>H', new_cs)
-        return True, modified_data
-    except:
-        return False, None
+    checksum = 0
+    for i in range(len(modified_data)):
+        if offset <= i < offset + 4:
+            continue
+        checksum += modified_data[i]
+    checksum &= 0xFFFFFFFF
+    modified_data[offset] = (checksum >> 24) & 0xFF
+    modified_data[offset + 1] = (checksum >> 16) & 0xFF
+    modified_data[offset + 2] = (checksum >> 8) & 0xFF
+    modified_data[offset + 3] = checksum & 0xFF
+    return True, modified_data
 
 
-def _api_request_json(path, method="GET", payload=None, token=None, timeout=15):
-    url = f"{API_BASE_URL}{path}"
-    headers = {"Accept": "application/json"}
-    data = None
-    if payload is not None:
-        data = json.dumps(payload, ensure_ascii=False).encode("utf-8")
-        headers["Content-Type"] = "application/json"
-    if token:
-        headers["Authorization"] = f"Bearer {token}"
-
-    print(f"[API] {method} {url}")
-    request = urllib.request.Request(url, data=data, headers=headers, method=method)
-    try:
-        with urllib.request.urlopen(request, timeout=timeout) as response:
-            raw = response.read().decode("utf-8")
-            print(f"[API] STATUS {response.status}")
-            preview = raw if len(raw) <= 1200 else raw[:1200] + "...(truncated)"
-            print(f"[API] RESPONSE {preview}")
-            return json.loads(raw)
-    except urllib.error.HTTPError as exc:
-        raw = exc.read().decode("utf-8", errors="ignore")
-        try:
-            data = json.loads(raw)
-            detail = data.get("detail") or raw or str(exc)
-        except Exception:
-            detail = raw or str(exc)
-        raise RuntimeError(detail)
-
-
-def _session_file_path():
-    base_dir = QStandardPaths.writableLocation(QStandardPaths.AppDataLocation) or os.path.join(os.path.expanduser("~"), ".ecuflash")
-    os.makedirs(base_dir, exist_ok=True)
-    return os.path.join(base_dir, USER_DATA_FILE_NAME)
-
-
-def load_session_data():
-    session_file = _session_file_path()
-    if not os.path.exists(session_file):
-        return None
-    try:
-        with open(session_file, "r", encoding="utf-8") as file_obj:
-            return json.load(file_obj)
-    except Exception:
-        return None
-
-
-def save_session_data(data):
-    session_file = _session_file_path()
-    with open(session_file, "w", encoding="utf-8") as file_obj:
-        json.dump(data, file_obj, indent=4, ensure_ascii=False)
-
-
-def clear_session_data():
-    session_file = _session_file_path()
-    try:
-        if os.path.exists(session_file):
-            os.remove(session_file)
-    except Exception:
-        pass
-
-
-def fetch_my_permissions(token):
-    data = _api_request_json("/auth/my-permissions", token=token)
-    function_ids = data.get("function_ids") or []
-    function_names = data.get("function_names") or []
-    return {
-        "ids": set(int(item) for item in function_ids),
-        "names": set(str(item).strip() for item in function_names if str(item).strip()),
-    }
-
-
-def fetch_purchase_config(token):
-    return _api_request_json("/purchase-config", token=token)
-
-
-def _parse_config_list(raw_value):
-    if isinstance(raw_value, list):
-        return raw_value
-    if not raw_value:
-        return []
-    try:
-        data = json.loads(raw_value)
-        return data if isinstance(data, list) else []
-    except Exception:
-        return []
-
-
-def _normalize_resource_search_text(value):
-    text = str(value or "").upper()
-    for old, new in (("（", "("), ("）", ")"), ("【", "["), ("】", "]")):
-        text = text.replace(old, new)
-    for token in (" ", "\t", "\r", "\n", "-", "_", ".", "/", "\\", "(", ")", "[", "]"):
-        text = text.replace(token, "")
-    return text
-
-
-def _resource_item_search_text(item):
-    if not isinstance(item, dict):
-        return _normalize_resource_search_text(item)
-    parts = []
-    for value in item.values():
-        if isinstance(value, (list, tuple, set)):
-            parts.extend(str(part) for part in value if part not in (None, ""))
-        elif value not in (None, ""):
-            parts.append(str(value))
-    return _normalize_resource_search_text(" ".join(parts))
-
-
-def _filter_resource_items(items, keyword):
-    query = _normalize_resource_search_text(keyword)
-    if not query:
-        return list(items or [])
-    return [item for item in (items or []) if query in _resource_item_search_text(item)]
-
-
-def _resolve_resource_url(url):
-    text = (url or "").strip()
-    if not text:
-        return ""
-    parsed = urllib.parse.urlparse(text)
-    if parsed.scheme:
-        return text
-    return urllib.parse.urljoin(API_BASE_URL + "/", text)
-
-
-def _open_url(url):
-    resolved = _resolve_resource_url(url)
-    if not resolved:
-        return False
-    return QDesktopServices.openUrl(QUrl(resolved))
-
-
-def _open_browser_download(url):
-    return _open_url(url)
-
-
-def _to_data_url(url):
-    resolved = _resolve_resource_url(url)
-    if not resolved:
-        return ""
-    try:
-        request = urllib.request.Request(resolved, headers={"Accept": "image/*"})
-        with urllib.request.urlopen(request, timeout=10) as response:
-            data = response.read()
-            content_type = response.headers.get_content_type() if response.headers else None
-
-        pixmap = QPixmap()
-        if pixmap.loadFromData(data):
-            if pixmap.width() > 260 or pixmap.height() > 360:
-                pixmap = pixmap.scaled(260, 360, Qt.KeepAspectRatio, Qt.SmoothTransformation)
-            buffer = QBuffer()
-            buffer.open(QIODevice.WriteOnly)
-            pixmap.save(buffer, "PNG")
-            data = bytes(buffer.data())
-            mime_type = "image/png"
-        else:
-            mime_type = content_type or mimetypes.guess_type(resolved)[0] or "image/png"
-
-        encoded = base64.b64encode(data).decode("ascii")
-        return f"data:{mime_type};base64,{encoded}"
-    except Exception:
-        return resolved
-
-
-def _normalize_learning_article_html(content_html):
-    html = str(content_html or "")
-    if not html.strip():
-        return ""
-    html = re.sub(r"<\/?(?:html|body)[^>]*>", "", html, flags=re.IGNORECASE)
-    html = re.sub(r"\sstyle\s*=\s*\"[^\"]*\"", "", html, flags=re.IGNORECASE)
-    html = re.sub(r"\sstyle\s*=\s*'[^']*'", "", html, flags=re.IGNORECASE)
-    html = re.sub(r"\sbgcolor\s*=\s*\"[^\"]*\"", "", html, flags=re.IGNORECASE)
-    html = re.sub(r"\sbgcolor\s*=\s*'[^']*'", "", html, flags=re.IGNORECASE)
-    html = re.sub(r"\swidth\s*=\s*\"[^\"]*\"", "", html, flags=re.IGNORECASE)
-    html = re.sub(r"\swidth\s*=\s*'[^']*'", "", html, flags=re.IGNORECASE)
-    html = re.sub(r"\sheight\s*=\s*\"[^\"]*\"", "", html, flags=re.IGNORECASE)
-    html = re.sub(r"\sheight\s*=\s*'[^']*'", "", html, flags=re.IGNORECASE)
-    html = re.sub(r"<table([^>]*)>", r"<table\1 cellpadding='8' cellspacing='0' border='1'>", html, flags=re.IGNORECASE)
-
-    def _replace_url_attr(match):
-        attr_name = match.group(1)
-        quote = match.group(2)
-        attr_value = match.group(3)
-        if attr_name.lower() == "src":
-            resolved = _to_data_url(attr_value)
-        else:
-            resolved = _resolve_resource_url(attr_value)
-        return f" {attr_name}={quote}{resolved}{quote}"
-
-    html = re.sub(r"\s(src|href)\s*=\s*([\"'])(.*?)\2", _replace_url_attr, html, flags=re.IGNORECASE)
-    return html
-
-
-def _copy_text_to_clipboard(text):
-    value = (text or "").strip()
-    if not value:
-        return False
-    clipboard = QApplication.clipboard()
-    if clipboard is None:
-        return False
-    clipboard.setText(value)
-    return True
-
-
-def _copy_url_to_clipboard(url):
-    return _copy_text_to_clipboard(_resolve_resource_url(url))
-
-
-def _get_disk_fingerprint():
-    candidates = []
-    try:
-        if sys.platform == "darwin":
-            text = os.popen("ioreg -rd1 -c IOPlatformExpertDevice 2>/dev/null").read()
-            for key in ("IOPlatformUUID", "IOPlatformSerialNumber"):
-                match = re.search(rf'"{key}"\s*=\s*"([^"]+)"', text)
-                if match:
-                    candidates.append(match.group(1))
-        elif sys.platform.startswith("win"):
-            text = os.popen("wmic csproduct get uuid 2>nul").read()
-            for line in text.splitlines():
-                value = line.strip()
-                if value and value.lower() != "uuid":
-                    candidates.append(value)
-        else:
-            for path in ("/etc/machine-id", "/var/lib/dbus/machine-id"):
-                if os.path.exists(path):
-                    try:
-                        candidates.append(open(path, "r", encoding="utf-8").read().strip())
-                    except Exception:
-                        pass
-    except Exception:
-        pass
-    return "|".join(item for item in candidates if item)
-
-
-def get_device_fingerprint():
-    raw = "|".join([
-        _get_disk_fingerprint(),
-        platform.system(),
-        platform.release(),
-        platform.machine(),
-        socket.gethostname(),
-        hex(uuid.getnode()),
-    ])
-    return hashlib.sha256(raw.encode("utf-8")).hexdigest()
-
-
-def get_device_name():
-    return f"{socket.gethostname()} / {platform.system()} {platform.machine()}"
-
-
-def check_license():
-    session = load_session_data()
-    if not session or not session.get("token"):
-        return None
-    try:
-        user = _api_request_json("/auth/me", token=session["token"])
-        session["user"] = user
-        session["name"] = user.get("name") or user.get("phone") or "未命名用户"
-        session["expire_time"] = session.get("expired_at") or "长期有效"
-        permissions = fetch_my_permissions(session["token"])
-        session["permission_function_ids"] = sorted(permissions["ids"])
-        session["permission_function_names"] = sorted(permissions["names"])
-        try:
-            session["purchase_config"] = fetch_purchase_config(session["token"])
-        except Exception:
-            session["purchase_config"] = {}
-        save_session_data(session)
-        return session
-    except Exception:
-        clear_session_data()
-        return None
-
-
-class RegisterDialog(QDialog):
-    def __init__(self):
-        super().__init__()
-        self.session_data = None
-        self.mode = "login"
-        self.setWindowTitle(f"ECUflash V{APP_VERSION} - 登录/注册")
-        apply_logo_to_window(self)
-        self.setFixedSize(620, 520)
-        self.setStyleSheet("""
-            QDialog { background-color: #f8f9fa; font-family: "Microsoft YaHei"; font-size: 18px; }
-            QLabel { font-size: 18px; color: #222222; }
-            QLineEdit { min-height: 45px; padding: 8px 12px; font-size: 16px; color: #222222; background: white; border: 1px solid #ddd; border-radius: 6px; }
-            QPushButton { min-height: 50px; background-color: #165DFF; color: white; border-radius: 8px; font-size: 17px; font-weight: bold; }
-            QPushButton:hover { background-color: #0F48CC; }
-        """)
-        layout = QVBoxLayout(self)
-        layout.setSpacing(16)
-        layout.setContentsMargins(60, 42, 60, 42)
-        self.title_label = QLabel("ECUflash 账号登录")
-        self.title_label.setFont(QFont("Microsoft YaHei", scaled_point(26), QFont.Bold))
-        self.title_label.setAlignment(Qt.AlignCenter)
-        self.title_label.setStyleSheet("color:#165DFF")
-        layout.addWidget(self.title_label)
-        self.desc_label = QLabel("请输入手机号和密码登录，首次可直接注册并绑定当前电脑")
-        self.desc_label.setAlignment(Qt.AlignCenter)
-        self.desc_label.setStyleSheet("color:#666666;font-size:15px;")
-        layout.addWidget(self.desc_label)
-
-        mode_row = QHBoxLayout()
-        mode_row.setSpacing(12)
-        self.login_mode_btn = QPushButton("登录")
-        self.register_mode_btn = QPushButton("注册")
-        self.login_mode_btn.clicked.connect(lambda: self.switch_mode("login"))
-        self.register_mode_btn.clicked.connect(lambda: self.switch_mode("register"))
-        mode_row.addWidget(self.login_mode_btn)
-        mode_row.addWidget(self.register_mode_btn)
-        layout.addLayout(mode_row)
-
-        self.name_label = QLabel("用户名：")
-        self.name_edit = QLineEdit()
-        self.name_edit.setPlaceholderText("请输入用户名")
-        layout.addWidget(self.name_label)
-        layout.addWidget(self.name_edit)
-
-        layout.addWidget(QLabel("手机号："))
-        self.phone_edit = QLineEdit()
-        self.phone_edit.setPlaceholderText("请输入手机号")
-        layout.addWidget(self.phone_edit)
-
-        layout.addWidget(QLabel("密码："))
-        self.password_edit = QLineEdit()
-        self.password_edit.setEchoMode(QLineEdit.Password)
-        self.password_edit.setPlaceholderText("请输入密码")
-        layout.addWidget(self.password_edit)
-
-        self.device_label = QLabel(f"当前设备：{get_device_name()}")
-        self.device_label.setStyleSheet("color:#4B5563;font-size:14px;")
-        layout.addWidget(self.device_label)
-
-        self.submit_btn = QPushButton("登录并进入主界面")
-        self.submit_btn.clicked.connect(self.submit)
-        layout.addWidget(self.submit_btn)
-
-        self.switch_mode("login")
-
-    def switch_mode(self, mode):
-        self.mode = mode
-        is_register = mode == "register"
-        self.name_label.setVisible(is_register)
-        self.name_edit.setVisible(is_register)
-        self.title_label.setText("ECUflash 用户注册" if is_register else "ECUflash 账号登录")
-        self.desc_label.setText(
-            "请输入用户名、手机号，密码按后台配置决定是否必填，注册后自动绑定当前电脑"
-            if is_register else
-            "请输入手机号和密码登录，账号会校验已绑定设备"
-        )
-        self.submit_btn.setText("注册并进入主界面" if is_register else "登录并进入主界面")
-        self.password_edit.setPlaceholderText("注册可留空（取决于后台配置）" if is_register else "请输入密码")
-        active_style = "background-color:#165DFF;color:white;"
-        inactive_style = "background-color:#E5E7EB;color:#374151;"
-        self.login_mode_btn.setStyleSheet(active_style if mode == "login" else inactive_style)
-        self.register_mode_btn.setStyleSheet(active_style if mode == "register" else inactive_style)
-
-    def _build_session(self, phone, data):
-        token = data["token"]
-        session = {
-            "token": token,
-            "expired_at": data.get("expired_at"),
-            "user": data.get("user", {}),
-            "name": data.get("user", {}).get("name") or data.get("user", {}).get("phone") or phone,
-            "expire_time": data.get("expired_at") or "长期有效",
-            "permission_function_ids": sorted(fetch_my_permissions(token)["ids"]),
-            "permission_function_names": sorted(fetch_my_permissions(token)["names"]),
-        }
-        try:
-            session["purchase_config"] = fetch_purchase_config(token)
-        except Exception:
-            session["purchase_config"] = {}
-        return session
-
-    def submit(self):
-        phone = self.phone_edit.text().strip()
-        password = self.password_edit.text().strip()
-        name = self.name_edit.text().strip()
-        device_id = get_device_fingerprint()
-        device_name = get_device_name()
-        if not phone:
-            show_message(self, QMessageBox.Warning, "错误", "手机号不能为空！")
-            return
-        if self.mode == "register" and not name:
-            show_message(self, QMessageBox.Warning, "错误", "注册时用户名不能为空！")
-            return
-        try:
-            if self.mode == "register":
-                data = _api_request_json(
-                    "/auth/register",
-                    method="POST",
-                    payload={
-                        "phone": phone,
-                        "password": password,
-                        "name": name,
-                        "device_id": device_id,
-                        "device_name": device_name,
-                    },
-                )
-                success_text = "注册成功！正在进入主界面。"
-            else:
-                data = _api_request_json(
-                    "/auth/login",
-                    method="POST",
-                    payload={
-                        "phone": phone,
-                        "password": password,
-                        "device_id": device_id,
-                        "device_name": device_name,
-                    },
-                )
-                success_text = "登录成功！正在进入主界面。"
-            session = self._build_session(phone, data)
-            save_session_data(session)
-            self.session_data = session
-            show_message(self, QMessageBox.Information, "成功", success_text)
-            self.accept()
-        except Exception as exc:
-            message = str(exc)
-            if self.mode == "register" and "registered_pending_approval" in message:
-                show_message(self, QMessageBox.Information, "注册成功", "注册申请已提交，请等待后台审批后再登录。")
-                self.password_edit.clear()
-                self.switch_mode("login")
-                return
-            if self.mode == "login" and "user pending approval" in message:
-                show_message(self, QMessageBox.Warning, "登录失败", "当前账号待后台审批，审批通过后才能登录。")
-                return
-            title = "注册失败" if self.mode == "register" else "登录失败"
-            show_message(self, QMessageBox.Warning, title, f"账号操作失败：{exc}")
-
-
-class ChecksumTool(QDialog):
-    def __init__(self,parent=None):
+class ChecksumDialog(QDialog):
+    def __init__(self, parent=None):
         super().__init__(parent)
-        self.setWindowTitle("德尔福 Checksum 校验和计算")
-        apply_logo_to_window(self)
-        self.setFixedSize(650,450)
-        self.setStyleSheet("""
-            QDialog{background-color:#f5f7fa;font-family:Microsoft YaHei;}
-            QPushButton{background-color:#165DFF;color:white;border-radius:8px;padding:12px;font-size:16px;}
-            QPushButton:hover{background-color:#0F48CC;}
-            QComboBox{min-height:45px;font-size:16px;padding:8px;border-radius:6px;}
-            QLabel{font-size:17px;}
-        """)
-        self.original_data=None
-        self.modified_data=None
-        self.init_ui()
-    def init_ui(self):
-        layout=QVBoxLayout(self)
-        layout.setSpacing(20)
-        layout.setContentsMargins(40,40,40,40)
-        title=QLabel("🔧 德尔福 ECU 校验和计算工具")
-        title.setFont(QFont("Microsoft YaHei", scaled_point(20), QFont.Bold))
-        title.setAlignment(Qt.AlignCenter)
-        layout.addWidget(title)
-        self.cpu_box=QComboBox()
+        self.setWindowTitle("Checksum工具")
+        self.resize(420, 260)
+        self.original_data = None
+        self.modified_data = None
+        layout = QVBoxLayout(self)
+        self.cpu_box = QComboBox()
         self.cpu_box.addItems(list(ECU_CPU_MAP.keys()))
         layout.addWidget(QLabel("选择CPU型号："))
         layout.addWidget(self.cpu_box)
-        self.btn_ori=QPushButton("📂 加载原始数据")
-        self.btn_mod=QPushButton("📂 加载修改后数据")
-        self.btn_calc=QPushButton("✅ 计算校验和并保存")
+        self.btn_ori = QPushButton("📂 加载原始数据")
+        self.btn_mod = QPushButton("📂 加载修改后数据")
+        self.btn_calc = QPushButton("✅ 计算校验和并保存")
         layout.addWidget(self.btn_ori)
         layout.addWidget(self.btn_mod)
         layout.addWidget(self.btn_calc)
-        self.status=QLabel("状态：等待操作")
+        self.status = QLabel("状态：等待操作")
         self.status.setAlignment(Qt.AlignCenter)
         layout.addWidget(self.status)
         self.btn_ori.clicked.connect(self.load_original)
         self.btn_mod.clicked.connect(self.load_modified)
         self.btn_calc.clicked.connect(self.calc_save)
+
     def load_original(self):
-        p=QFileDialog.getOpenFileName(self,"选择原始BIN文件","","BIN Files (*.bin)")[0]
+        p = QFileDialog.getOpenFileName(self, "选择原始BIN文件", "", "BIN Files (*.bin)")[0]
         if p:
-            with open(p,"rb") as f:self.original_data=bytearray(f.read())
+            with open(p, "rb") as f:
+                self.original_data = bytearray(f.read())
             self.status.setText("状态：原始数据已加载")
+
     def load_modified(self):
-        p=QFileDialog.getOpenFileName(self,"选择修改后BIN文件","","BIN Files (*.bin)")[0]
+        p = QFileDialog.getOpenFileName(self, "选择修改后BIN文件", "", "BIN Files (*.bin)")[0]
         if p:
-            with open(p,"rb") as f:self.modified_data=bytearray(f.read())
+            with open(p, "rb") as f:
+                self.modified_data = bytearray(f.read())
             self.status.setText("状态：修改后数据已加载")
+
     def calc_save(self):
         if self.original_data is None or self.modified_data is None:
-            QMessageBox.warning(self,"提示","请先加载原始数据和修改后数据！")
+            QMessageBox.warning(self, "提示", "请先加载原始数据和修改后数据！")
             return
-        cpu=self.cpu_box.currentText()
-        offset=ECU_CPU_MAP[cpu]
-        ok,new_data=calculate_checksum(self.original_data,self.modified_data,offset)
+        cpu = self.cpu_box.currentText()
+        offset = ECU_CPU_MAP[cpu]
+        ok, new_data = calculate_checksum(self.original_data, self.modified_data, offset)
         if not ok:
-            QMessageBox.critical(self,"错误","数据错误，请重新加载数据！")
+            QMessageBox.critical(self, "错误", "数据错误，请重新加载数据！")
             return
-        save_path=QFileDialog.getSaveFileName(self,"保存文件","","BIN Files (*.bin)")[0]
+        save_path = QFileDialog.getSaveFileName(self, "保存文件", "", "BIN Files (*.bin)")[0]
         if save_path:
-            with open(save_path,"wb") as f:f.write(new_data)
-            QMessageBox.information(self,"成功","Checksum计算成功！文件已保存！")
+            with open(save_path, "wb") as f:
+                f.write(new_data)
+            QMessageBox.information(self, "成功", "Checksum计算成功！文件已保存！")
             self.status.setText("状态：计算完成")
+
+
+class ImagePreviewDialog(QDialog):
+    def __init__(self, pixmap=None, title="图片预览", parent=None):
+        super().__init__(parent)
+        self.setWindowTitle(title)
+        apply_logo_to_window(self)
+        self.resize(1200, 900)
+        self.setStyleSheet(
+            "QDialog{background:#050A14;} QLabel{color:#E5E7EB;} "
+            "QPushButton{background:#2563EB;color:white;border:none;border-radius:8px;padding:10px 18px;font-size:14px;font-weight:bold;}"
+        )
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(18, 18, 18, 18)
+        layout.setSpacing(14)
+
+        self.image_label = QLabel("暂无图片")
+        self.image_label.setAlignment(Qt.AlignCenter)
+        self.image_label.setStyleSheet("background:#020617;border:1px solid rgba(76,133,231,0.40);border-radius:14px;padding:14px;")
+        self.image_label.setMinimumSize(900, 650)
+        layout.addWidget(self.image_label, 1)
+
+        close_btn = QPushButton("关闭")
+        close_btn.clicked.connect(self.accept)
+        layout.addWidget(close_btn, 0, Qt.AlignRight)
+
+        self._pixmap = None
+        if pixmap and not pixmap.isNull():
+            self._pixmap = pixmap
+            self._update_preview()
+
+    def resizeEvent(self, event):
+        super().resizeEvent(event)
+        self._update_preview()
+
+    def _update_preview(self):
+        if not self._pixmap or self._pixmap.isNull():
+            return
+        target_size = self.image_label.size() - QSize(24, 24)
+        if target_size.width() <= 0 or target_size.height() <= 0:
+            return
+        scaled = self._pixmap.scaled(target_size, Qt.KeepAspectRatio, Qt.SmoothTransformation)
+        self.image_label.setPixmap(scaled)
+
+
+class ArticleTextBrowser(QTextBrowser):
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self._embedded_images = []
+
+    def set_embedded_images(self, images):
+        self._embedded_images = images or []
+
+    def mouseDoubleClickEvent(self, event):
+        cursor = self.cursorForPosition(event.pos())
+        fmt = cursor.charFormat()
+        image_name = fmt.stringProperty(QTextFormat.ImageName)
+        if image_name:
+            for image_data in self._embedded_images:
+                if image_data.get("src") == image_name and image_data.get("pixmap") and not image_data["pixmap"].isNull():
+                    dlg = ImagePreviewDialog(image_data["pixmap"], image_data.get("title") or "正文图片", self)
+                    dlg.exec_()
+                    event.accept()
+                    return
+        super().mouseDoubleClickEvent(event)
 
 
 class ECUSearchComboBox(QComboBox):
@@ -991,6 +611,26 @@ def _api_get_json(path, params=None, timeout=15):
         return json.loads(raw)
 
 
+def _api_request_json(path, method="GET", data=None, token=None, timeout=20):
+    url = f"{API_BASE_URL}{path}"
+    body = None
+    headers = {"Accept": "application/json"}
+    if data is not None:
+        body = json.dumps(data).encode("utf-8")
+        headers["Content-Type"] = "application/json"
+    if token:
+        headers["Authorization"] = f"Bearer {token}"
+
+    print(f"[API] {method} {url}")
+    request = urllib.request.Request(url, data=body, headers=headers, method=method)
+    with urllib.request.urlopen(request, timeout=timeout) as response:
+        raw = response.read().decode("utf-8")
+        print(f"[API] STATUS {response.status}")
+        preview = raw if len(raw) <= 1200 else raw[:1200] + "...(truncated)"
+        print(f"[API] RESPONSE {preview}")
+        return json.loads(raw)
+
+
 def load_remote_runtime_dataset(token):
     data = _api_request_json("/runtime-dataset", token=token)
 
@@ -1022,424 +662,393 @@ def load_remote_runtime_dataset(token):
     )
 
 
+def fetch_my_permissions(token):
+    data = _api_request_json("/auth/my-permissions", token=token)
+    return {
+        "ids": set(int(item) for item in data.get("function_ids", []) if str(item).isdigit()),
+        "names": set(str(item).strip() for item in data.get("function_names", []) if str(item).strip()),
+    }
+
+
+def fetch_purchase_config(token):
+    return _api_request_json("/purchase-config", token=token)
+
+
+def _normalize_resource_search_text(value):
+    return re.sub(r"\s+", " ", str(value or "")).strip().lower()
+
+
+def _resource_item_search_text(item):
+    if not isinstance(item, dict):
+        return _normalize_resource_search_text(item)
+    parts = []
+    for value in item.values():
+        if isinstance(value, (list, tuple, set)):
+            parts.extend(str(part) for part in value if part not in (None, ""))
+        elif value not in (None, ""):
+            parts.append(str(value))
+    return _normalize_resource_search_text(" ".join(parts))
+
+
+def _filter_resource_items(items, keyword):
+    query = _normalize_resource_search_text(keyword)
+    if not query:
+        return list(items or [])
+    return [item for item in (items or []) if query in _resource_item_search_text(item)]
+
+
+def _resolve_resource_url(url):
+    text = (url or "").strip()
+    if not text:
+        return ""
+    parsed = urllib.parse.urlparse(text)
+    if parsed.scheme:
+        return text
+    return urllib.parse.urljoin(API_BASE_URL + "/", text)
+
+
+def _open_url(url):
+    resolved = _resolve_resource_url(url)
+    if not resolved:
+        return False
+    return QDesktopServices.openUrl(QUrl(resolved))
+
+
+def _open_browser_download(url):
+    return _open_url(url)
+
+
+def _extract_embedded_images_from_html(html):
+    images = []
+    if not html:
+        return images
+    for match in re.finditer(r"<img[^>]+src=['\"]([^'\"]+)['\"][^>]*>", html, flags=re.IGNORECASE):
+        src = match.group(1).strip()
+        if not src:
+            continue
+        pixmap = QPixmap()
+        title = "正文图片"
+        if src.startswith("data:"):
+            try:
+                payload = src.split(",", 1)[1]
+                pixmap.loadFromData(base64.b64decode(payload))
+            except Exception:
+                pixmap = QPixmap()
+        else:
+            try:
+                request = urllib.request.Request(src, headers={"Accept": "image/*"})
+                with urllib.request.urlopen(request, timeout=10) as response:
+                    data = response.read()
+                pixmap.loadFromData(data)
+            except Exception:
+                pixmap = QPixmap()
+        if not pixmap.isNull():
+            images.append({"src": src, "pixmap": pixmap, "title": title})
+    return images
+
+
+def _to_data_url(url):
+    resolved = _resolve_resource_url(url)
+    if not resolved:
+        return ""
+    try:
+        request = urllib.request.Request(resolved, headers={"Accept": "image/*"})
+        with urllib.request.urlopen(request, timeout=10) as response:
+            data = response.read()
+            content_type = response.headers.get_content_type() if response.headers else None
+
+        pixmap = QPixmap()
+        if pixmap.loadFromData(data):
+            if pixmap.width() > 340 or pixmap.height() > 460:
+                pixmap = pixmap.scaled(340, 460, Qt.KeepAspectRatio, Qt.SmoothTransformation)
+            buffer = QBuffer()
+            buffer.open(QIODevice.WriteOnly)
+            pixmap.save(buffer, "PNG")
+            data = bytes(buffer.data())
+            mime_type = "image/png"
+        else:
+            mime_type = content_type or mimetypes.guess_type(resolved)[0] or "image/png"
+
+        encoded = base64.b64encode(data).decode("ascii")
+        return f"data:{mime_type};base64,{encoded}"
+    except Exception:
+        return resolved
+
+
+def _normalize_learning_article_html(content_html):
+    html = str(content_html or "")
+    if not html.strip():
+        return ""
+    html = re.sub(r"<\/?(?:html|body)[^>]*>", "", html, flags=re.IGNORECASE)
+    html = re.sub(r"\sstyle\s*=\s*\"[^\"]*\"", "", html, flags=re.IGNORECASE)
+    html = re.sub(r"\sstyle\s*=\s*'[^']*'", "", html, flags=re.IGNORECASE)
+    html = re.sub(r"\sbgcolor\s*=\s*\"[^\"]*\"", "", html, flags=re.IGNORECASE)
+    html = re.sub(r"\sbgcolor\s*=\s*'[^']*'", "", html, flags=re.IGNORECASE)
+    html = re.sub(r"\swidth\s*=\s*\"[^\"]*\"", "", html, flags=re.IGNORECASE)
+    html = re.sub(r"\swidth\s*=\s*'[^']*'", "", html, flags=re.IGNORECASE)
+    html = re.sub(r"\sheight\s*=\s*\"[^\"]*\"", "", html, flags=re.IGNORECASE)
+    html = re.sub(r"\sheight\s*=\s*'[^']*'", "", html, flags=re.IGNORECASE)
+    html = re.sub(r"<table([^>]*)>", r"<table\1 cellpadding='8' cellspacing='0' border='1'>", html, flags=re.IGNORECASE)
+
+    def _replace_url_attr(match):
+        attr_name = match.group(1)
+        quote = match.group(2)
+        attr_value = match.group(3)
+        if attr_name.lower() == "src":
+            resolved = _to_data_url(attr_value)
+        else:
+            resolved = _resolve_resource_url(attr_value)
+        return f" {attr_name}={quote}{resolved}{quote}"
+
+    html = re.sub(r"\s(src|href)\s*=\s*([\"'])(.*?)\2", _replace_url_attr, html, flags=re.IGNORECASE)
+    return html
+
+
+def _copy_text_to_clipboard(text):
+    value = (text or "").strip()
+    if not value:
+        return False
+    clipboard = QApplication.clipboard()
+    if clipboard is None:
+        return False
+    clipboard.setText(value)
+    return True
+
+
+def _copy_url_to_clipboard(url):
+    return _copy_text_to_clipboard(_resolve_resource_url(url))
+
+
+def _get_disk_fingerprint():
+    candidates = []
+    try:
+        if sys.platform == "darwin":
+            text = os.popen("ioreg -rd1 -c IOPlatformExpertDevice 2>/dev/null").read()
+            for key in ("IOPlatformUUID", "IOPlatformSerialNumber"):
+                match = re.search(rf'"{key}"\s*=\s*"([^"]+)"', text)
+                if match:
+                    candidates.append(match.group(1))
+        elif sys.platform.startswith("win"):
+            text = os.popen("wmic csproduct get uuid 2>nul").read()
+            for line in text.splitlines():
+                value = line.strip()
+                if value and value.lower() != "uuid":
+                    candidates.append(value)
+        else:
+            for path in ("/etc/machine-id", "/var/lib/dbus/machine-id"):
+                if os.path.exists(path):
+                    try:
+                        candidates.append(open(path, "r", encoding="utf-8").read().strip())
+                    except Exception:
+                        pass
+    except Exception:
+        pass
+    return "|".join(item for item in candidates if item)
+
+
+def get_device_fingerprint():
+    raw = "|".join([
+        _get_disk_fingerprint(),
+        platform.system(),
+        platform.release(),
+        platform.machine(),
+        socket.gethostname(),
+        hex(uuid.getnode()),
+    ])
+    return hashlib.sha256(raw.encode("utf-8")).hexdigest()
+
+
 def get_computer_name():
-    """获取电脑名称"""
     try:
         return socket.gethostname()
-    except:
+    except Exception:
         return "PC"
 
 
 def generate_random_num(length=6):
-    """生成随机数"""
-    return ''.join([str(random.randint(0,9)) for _ in range(length)])
+    return "".join(random.choice("0123456789") for _ in range(length))
 
 
-class ChecksumDialog(QDialog):
+def save_session_data(data):
+    try:
+        with open(USER_DATA_FILE_NAME, "w", encoding="utf-8") as f:
+            json.dump(data, f, ensure_ascii=False, indent=2)
+    except Exception:
+        pass
+
+
+def clear_session_data():
+    try:
+        if os.path.exists(USER_DATA_FILE_NAME):
+            os.remove(USER_DATA_FILE_NAME)
+    except Exception:
+        pass
+
+
+def check_license():
+    try:
+        if os.path.exists(USER_DATA_FILE_NAME):
+            with open(USER_DATA_FILE_NAME, "r", encoding="utf-8") as f:
+                return json.load(f)
+    except Exception:
+        pass
+    return None
+
+
+class RegisterDialog(QDialog):
     def __init__(self, parent=None):
         super().__init__(parent)
-        self.setWindowTitle("德尔福 Checksum 校验和计算")
+        self.session_data = None
+        self.setWindowTitle("账号登录")
         apply_logo_to_window(self)
-        self.setFixedSize(500, 350)
-        self.setStyleSheet("""
-            QDialog {
-                background-color: #060B16;
-                font-family: Microsoft YaHei;
-            }
-            QLabel {
-                font-size: 14px;
-                color: #E5E7EB;
-            }
-            QComboBox {
-                font-size: 14px;
-                padding: 8px;
-                border: 1px solid rgba(96, 165, 250, 0.35);
-                border-radius: 8px;
-                min-height: 35px;
-                background: #111827;
-                color: #F9FAFB;
-            }
-            QPushButton {
-                font-size: 14px;
-                font-weight: bold;
-                color: #FFFFFF;
-                border: none;
-                border-radius: 8px;
-                padding: 10px;
-                min-height: 40px;
-            }
-        """)
-        
-        self.original_file_data = b""
-        self.original_file_path = ""
-        self.modified_file_data = b""
-        self.modified_file_path = ""
-        
-        main_layout = QVBoxLayout(self)
-        main_layout.setContentsMargins(30, 30, 30, 20)
-        main_layout.setSpacing(15)
-        
-        title_label = QLabel("德尔福 ECU 校验和计算工具")
-        title_label.setStyleSheet("font-size: 16px; font-weight: bold; color: #60A5FA;")
-        title_label.setAlignment(Qt.AlignCenter)
-        main_layout.addWidget(title_label)
-        
-        cpu_layout = QHBoxLayout()
-        cpu_label = QLabel("选择CPU型号：")
-        self.cpu_combobox = QComboBox()
-        self.cpu_combobox.addItems([
-            "ECU MT22.1-256kb", 
-            "ECU MT22.1-384kb", 
-            "ECU MT22.1-512kb", 
-            "ECU MT22---768KB", 
-            "ECU MT60.1-512kb", 
-            "ECU MT60.1-768KB"
-        ])
-        self.cpu_combobox.setCurrentText("ECU MT22.1-256kb")
-        cpu_layout.addWidget(cpu_label)
-        cpu_layout.addWidget(self.cpu_combobox)
-        main_layout.addLayout(cpu_layout)
-        
-        self.load_original_btn = QPushButton("📂 加载原始数据")
-        self.load_original_btn.setStyleSheet("background-color: #0078D7;")
-        self.load_original_btn.clicked.connect(self.load_original_file)
-        main_layout.addWidget(self.load_original_btn)
-        
-        self.load_modified_btn = QPushButton("📂 加载修改后数据")
-        self.load_modified_btn.setStyleSheet("background-color: #0078D7;")
-        self.load_modified_btn.clicked.connect(self.load_modified_file)
-        main_layout.addWidget(self.load_modified_btn)
-        
-        self.calc_save_btn = QPushButton("✅ 计算校验和并保存")
-        self.calc_save_btn.setStyleSheet("background-color: #107C10;")
-        self.calc_save_btn.clicked.connect(self.calculate_and_save)
-        main_layout.addWidget(self.calc_save_btn)
-        
-        self.status_label = QLabel("状态：等待操作")
-        self.status_label.setStyleSheet("""
-            QLabel {
-                font-size: 14px;
-                color: #F59E0B;
-                font-weight: bold;
-                margin-top: 10px;
-            }
-        """)
-        self.status_label.setAlignment(Qt.AlignCenter)
-        main_layout.addWidget(self.status_label)
-        
-    def load_original_file(self):
-        file_path, _ = QFileDialog.getOpenFileName(
-            self, "选择原始BIN文件", "", "BIN文件 (*.bin);;所有文件 (*.*)"
+        self.resize(560, 420)
+        self.setStyleSheet(
+            "QDialog { background-color: #111827; font-family: Microsoft YaHei; }"
+            "QLabel { color: #F3F4F6; }"
+            "QLineEdit { background:#0F172A; color:#E5E7EB; border:1px solid #334155; border-radius:8px; padding:10px 12px; font-size:14px; }"
+            "QPushButton { background:#2563EB; color:white; border:none; border-radius:8px; padding:10px 18px; font-size:14px; font-weight:bold; }"
         )
-        if file_path:
-            try:
-                with open(file_path, 'rb') as f:
-                    self.original_file_data = f.read()
-                self.original_file_path = file_path
-                self.status_label.setText(f"状态：原始数据加载成功 - {os.path.basename(file_path)}")
-                self.parent().add_operation_log(f"校验和工具：加载原始文件 - {file_path}")
-            except Exception as e:
-                msg = create_branded_message_box(self)
-                msg.setIcon(QMessageBox.Critical)
-                msg.setText(f"加载原始文件失败：{str(e)}")
-                msg.setStyleSheet("QLabel{color:black;} QPushButton{color:white; background:#0078D7;}")
-                msg.exec_()
-                self.status_label.setText(f"状态：加载原始文件失败 - {str(e)}")
-    
-    def load_modified_file(self):
-        file_path, _ = QFileDialog.getOpenFileName(
-            self, "选择修改后BIN文件", "", "BIN文件 (*.bin);;所有文件 (*.*)"
-        )
-        if file_path:
-            try:
-                with open(file_path, 'rb') as f:
-                    self.modified_file_data = f.read()
-                self.modified_file_path = file_path
-                self.status_label.setText(f"状态：修改后数据加载成功 - {os.path.basename(file_path)}")
-                self.parent().add_operation_log(f"校验和工具：加载修改后文件 - {file_path}")
-            except Exception as e:
-                msg = create_branded_message_box(self)
-                msg.setIcon(QMessageBox.Critical)
-                msg.setText(f"加载修改后文件失败：{str(e)}")
-                msg.setStyleSheet("QLabel{color:black;} QPushButton{color:white; background:#0078D7;}")
-                msg.exec_()
-                self.status_label.setText(f"状态：加载修改后文件失败 - {str(e)}")
-    
-    def calculate_and_save(self):
-        if not self.original_file_data:
-            msg = create_branded_message_box(self)
-            msg.setIcon(QMessageBox.Warning)
-            msg.setText("请先加载原始数据！")
-            msg.setStyleSheet("QLabel{color:black;} QPushButton{color:white; background:#0078D7;}")
-            msg.exec_()
-            self.status_label.setText("状态：请先加载原始数据")
-            return
-            
-        if not self.modified_file_data:
-            msg = create_branded_message_box(self)
-            msg.setIcon(QMessageBox.Warning)
-            msg.setText("请先加载修改后数据！")
-            msg.setStyleSheet("QLabel{color:black;} QPushButton{color:white; background:#0078D7;}")
-            msg.exec_()
-            self.status_label.setText("状态：请先加载修改后数据")
-            return
-            
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(28, 28, 28, 28)
+        layout.setSpacing(14)
+
+        self.title_label = QLabel("账号登录")
+        self.title_label.setFont(QFont("Microsoft YaHei", 18, QFont.Bold))
+        self.title_label.setStyleSheet("color:#165DFF")
+        layout.addWidget(self.title_label)
+
+        self.desc_label = QLabel("请输入账号和密码完成登录")
+        self.desc_label.setStyleSheet("color:#666666;font-size:15px;")
+        layout.addWidget(self.desc_label)
+
+        self.phone_edit = QLineEdit()
+        self.phone_edit.setPlaceholderText("账号")
+        layout.addWidget(self.phone_edit)
+
+        self.password_edit = QLineEdit()
+        self.password_edit.setPlaceholderText("密码")
+        self.password_edit.setEchoMode(QLineEdit.Password)
+        layout.addWidget(self.password_edit)
+
+        self.device_label = QLabel(f"设备指纹：{get_device_fingerprint()[:16]}...")
+        self.device_label.setStyleSheet("color:#4B5563;font-size:14px;")
+        layout.addWidget(self.device_label)
+
+        btn_row = QHBoxLayout()
+        self.login_btn = QPushButton("登录")
+        self.login_btn.clicked.connect(self.do_login)
+        self.register_btn = QPushButton("注册")
+        self.register_btn.clicked.connect(self.do_register)
+        cancel_btn = QPushButton("取消")
+        cancel_btn.clicked.connect(self.reject)
+        btn_row.addWidget(self.login_btn)
+        btn_row.addWidget(self.register_btn)
+        btn_row.addWidget(cancel_btn)
+        layout.addLayout(btn_row)
+
+    def _build_session(self, phone, data):
+        user = data.get("user") or {}
+        token = data.get("token") or data.get("access_token") or ""
+        session = {
+            "phone": phone,
+            "token": token,
+            "user": user,
+            "name": user.get("name") or user.get("phone") or phone,
+        }
         try:
-            cpu_model = self.cpu_combobox.currentText()
-            checksum_addr = CHECKSUM_ADDRESSES.get(cpu_model, 0)
-            
-            original_crc32 = binascii.crc32(self.original_file_data) & 0xFFFFFFFF
-            original_md5 = hashlib.md5(self.original_file_data).hexdigest().upper()
-            modified_crc32 = binascii.crc32(self.modified_file_data) & 0xFFFFFFFF
-            modified_md5 = hashlib.md5(self.modified_file_data).hexdigest().upper()
-            
-            result_info = f"""校验和计算完成！
-            
-CPU型号：{cpu_model}
-原始文件CRC32：{original_crc32:08X}
-修改后文件CRC32：{modified_crc32:08X}
-原始文件MD5：{original_md5}
-修改后文件MD5：{modified_md5}
+            permissions = fetch_my_permissions(token)
+            session["permission_function_ids"] = sorted(permissions["ids"])
+            session["permission_function_names"] = sorted(permissions["names"])
+            session["purchase_config"] = fetch_purchase_config(token)
+        except Exception:
+            session["permission_function_ids"] = []
+            session["permission_function_names"] = []
+            session["purchase_config"] = {}
+        return session
 
-校验结果：
-CRC32是否一致：{"✅ 是" if original_crc32 == modified_crc32 else "❌ 否"}
-MD5是否一致：{"✅ 是" if original_md5 == modified_md5 else "❌ 否"}"""
-            
-            msg = create_branded_message_box(self)
-            msg.setIcon(QMessageBox.Information)
-            msg.setText("计算完成")
-            msg.setInformativeText(result_info)
-            msg.setStyleSheet("QLabel{color:black;} QPushButton{color:white; background:#0078D7;}")
-            msg.exec_()
-            self.status_label.setText("状态：校验和计算完成，准备保存文件")
-            
-            # 生成规范文件名
-            computer_name = get_computer_name()
-            random_num = generate_random_num()
-            default_filename = f"ECUflash_{computer_name}_校验和计算_{random_num}.bin"
-            desktop_path = os.path.join(os.path.expanduser("~"), "Desktop")
-            default_path = os.path.join(desktop_path, default_filename)
-            
-            save_path, _ = QFileDialog.getSaveFileName(
-                self, "保存校验后文件", default_path, "BIN文件 (*.bin);;所有文件 (*.*)"
+    def do_login(self):
+        phone = self.phone_edit.text().strip()
+        password = self.password_edit.text().strip()
+        if not phone or not password:
+            show_message(self, QMessageBox.Warning, "提示", "请输入账号和密码")
+            return
+        try:
+            data = _api_request_json(
+                "/auth/login",
+                method="POST",
+                data={
+                    "phone": phone,
+                    "password": password,
+                    "device_id": get_device_fingerprint(),
+                    "device_name": platform.node() or socket.gethostname() or "Windows-PC",
+                },
             )
-            
-            if save_path:
-                with open(save_path, 'wb') as f:
-                    f.write(self.modified_file_data)
-                self.status_label.setText(f"状态：文件保存成功 - {os.path.basename(save_path)}")
-                msg = create_branded_message_box(self)
-                msg.setIcon(QMessageBox.Information)
-                msg.setText("保存成功")
-                msg.setInformativeText(f"文件已保存到：{save_path}")
-                msg.setStyleSheet("QLabel{color:black;} QPushButton{color:white; background:#0078D7;}")
-                msg.exec_()
-                self.parent().add_operation_log(f"校验和工具：计算并保存文件 - {save_path}")
-                self.parent().add_operation_log(f"校验和结果：原始CRC32={original_crc32:08X}, 修改后CRC32={modified_crc32:08X}")
-                
-        except Exception as e:
-            msg = create_branded_message_box(self)
-            msg.setIcon(QMessageBox.Critical)
-            msg.setText(f"计算/保存失败：{str(e)}")
-            msg.setStyleSheet("QLabel{color:black;} QPushButton{color:white; background:#0078D7;}")
-            msg.exec_()
-            self.status_label.setText(f"状态：操作失败 - {str(e)}")
-            self.parent().add_operation_log(f"校验和工具：操作失败 - {str(e)}")
+            session = self._build_session(phone, data)
+            self.session_data = session
+            save_session_data(session)
+            self.accept()
+        except Exception as exc:
+            show_message(self, QMessageBox.Critical, "错误", f"账号操作失败：{exc}")
+
+    def do_register(self):
+        phone = self.phone_edit.text().strip()
+        password = self.password_edit.text().strip()
+        if not phone:
+            show_message(self, QMessageBox.Warning, "提示", "请输入注册账号")
+            return
+        if not password:
+            show_message(self, QMessageBox.Warning, "提示", "请输入注册密码")
+            return
+        try:
+            data = _api_request_json(
+                "/auth/register",
+                method="POST",
+                data={
+                    "phone": phone,
+                    "password": password,
+                    "name": phone,
+                    "device_id": get_device_fingerprint(),
+                    "device_name": platform.node() or socket.gethostname() or "Windows-PC",
+                },
+            )
+            session = self._build_session(phone, data)
+            self.session_data = session
+            save_session_data(session)
+            show_message(self, QMessageBox.Information, "成功", "注册并登录成功")
+            self.accept()
+        except Exception as exc:
+            show_message(self, QMessageBox.Critical, "错误", f"注册失败：{exc}")
 
 
-class InlineSelect(QWidget):
-    currentTextChanged = pyqtSignal(str)
-
+class InlineSelect(QComboBox):
     def __init__(self, placeholder="", parent=None):
         super().__init__(parent)
-        self._items = []
-        self._current_text = ""
-        self._max_visible_items = 6
-
-        self.button = QPushButton(placeholder or "请选择", self)
-        self.button.setCursor(Qt.PointingHandCursor)
-        self.button.clicked.connect(self.toggle_popup)
-
-        self.list_widget = QListWidget(None)
-        self.list_widget.setWindowFlags(Qt.Popup | Qt.FramelessWindowHint)
-        self.list_widget.itemClicked.connect(self._on_item_clicked)
-        self.list_widget.hide()
-
-        layout = QVBoxLayout(self)
-        layout.setContentsMargins(0, 0, 0, 0)
-        layout.setSpacing(0)
-        layout.addWidget(self.button)
-
-        self.setStyleSheet("""
-            InlineSelect QPushButton {
-                background-color: rgba(8, 26, 71, 0.98);
-                border: 1px solid rgba(85, 136, 225, 0.58);
-                border-radius: 9px;
-                color: #E8F1FF;
-                font-size: 14px;
-                font-weight: 500;
-                text-align: left;
-                padding: 7px 12px;
-                min-height: 46px;
-                max-height: 50px;
-            }
-            InlineSelect QPushButton:hover {
-                border: 1px solid rgba(118, 163, 238, 0.85);
-            }
-        """)
-        self.list_widget.setStyleSheet("""
-            QListWidget {
-                background-color: rgba(8, 26, 71, 0.98);
-                border: 1px solid rgba(85, 136, 225, 0.70);
-                border-radius: 9px;
-                color: #E8F1FF;
-                font-size: 13px;
-                outline: none;
-                padding: 3px 0;
-            }
-            QListWidget::item {
-                min-height: 28px;
-                padding: 4px 10px;
-            }
-            QListWidget::item:selected {
-                background-color: #2f69e8;
-                color: #ffffff;
-            }
-            QListWidget::item:hover {
-                background-color: rgba(60, 110, 200, 0.55);
-            }
-        """)
-
-    def setMaxVisibleItems(self, count):
-        self._max_visible_items = max(1, int(count))
-        self._refresh_popup_height()
-
-    def setPlaceholderText(self, text):
-        if not self._current_text:
-            self.button.setText(text or "")
-
-    def addItems(self, items):
-        for text in items:
-            t = str(text)
-            self._items.append(t)
-            self.list_widget.addItem(t)
-        if not self._current_text and self._items:
-            self._current_text = self._items[0]
-            self.button.setText(self._current_text)
-        self._refresh_popup_height()
-
-    def clear(self):
-        self._items = []
-        self._current_text = ""
-        self.list_widget.clear()
-        self.button.setText("")
-        self.list_widget.hide()
-
-    def currentText(self):
-        return self._current_text
-
-    def setCurrentText(self, text):
-        text = str(text)
-        if text not in self._items:
-            return
-        if text == self._current_text:
-            return
-        self._current_text = text
-        self.button.setText(text)
-        self.currentTextChanged.emit(text)
-
-    def setEnabled(self, enabled):
-        super().setEnabled(enabled)
-        self.button.setEnabled(enabled)
-        self.list_widget.setEnabled(enabled)
-        if not enabled:
-            self.list_widget.hide()
-
-    def view(self):
-        return self.list_widget
-
-    def toggle_popup(self):
-        if self.list_widget.isVisible():
-            self._hide_popup()
-        else:
-            self._show_popup()
-
-    def _refresh_popup_height(self):
-        if self.list_widget.count() <= 0:
-            return
-        row_h = max(28, self.list_widget.sizeHintForRow(0))
-        visible_count = min(self.list_widget.count(), self._max_visible_items)
-        height = visible_count * row_h + 8
-        self.list_widget.setFixedHeight(height)
-
-    def _show_popup(self):
-        if not self._items:
-            return
-        self._refresh_popup_height()
-        popup_width = max(self.width(), 280)
-        self.list_widget.setFixedWidth(popup_width)
-
-        global_pos = self.mapToGlobal(QPoint(0, self.height() + 2))
-        self.list_widget.move(global_pos)
-        self.list_widget.show()
-        self.list_widget.raise_()
-        self.list_widget.setFocus()
-        app = QApplication.instance()
-        if app:
-            app.installEventFilter(self)
-
-    def _hide_popup(self):
-        self.list_widget.hide()
-        app = QApplication.instance()
-        if app:
-            app.removeEventFilter(self)
-
-    def eventFilter(self, watched, event):
-        if self.list_widget.isVisible() and event.type() == QEvent.MouseButtonPress:
-            global_pos = event.globalPos()
-            popup_rect = self.list_widget.rect()
-            popup_top_left = self.list_widget.mapToGlobal(popup_rect.topLeft())
-            popup_bottom_right = self.list_widget.mapToGlobal(popup_rect.bottomRight())
-            in_popup = QRect(popup_top_left, popup_bottom_right).contains(global_pos)
-
-            btn_rect = self.button.rect()
-            btn_top_left = self.button.mapToGlobal(btn_rect.topLeft())
-            btn_bottom_right = self.button.mapToGlobal(btn_rect.bottomRight())
-            in_button = QRect(btn_top_left, btn_bottom_right).contains(global_pos)
-
-            if not in_popup and not in_button:
-                self._hide_popup()
-
-        if self.list_widget.isVisible() and event.type() == QEvent.KeyPress and event.key() == Qt.Key_Escape:
-            self._hide_popup()
-            return True
-
-        return super().eventFilter(watched, event)
-
-    def _on_item_clicked(self, item):
-        text = item.text()
-        if text != self._current_text:
-            self._current_text = text
-            self.button.setText(text)
-            self.currentTextChanged.emit(text)
-        self._hide_popup()
+        self.setEditable(False)
+        self.setInsertPolicy(QComboBox.NoInsert)
+        if placeholder:
+            self.addItem(placeholder)
 
 
 class ECUFlashWindow(QMainWindow):
-    def __init__(self):
+    def __init__(self, license_data):
         super().__init__()
+        self.license_data = license_data or {}
+        self.file_data = None
         self.file_path = ""
-        self.file_data = b""
         self.current_ecu_info = None
         self.current_car_type = ""
         self.current_ecu_name = ""
-        self.current_identify_code = ""  # 记录当前识别到的特征码
+        self.current_identify_code = ""
+        self.is_admin_user = bool(self.license_data.get("user", {}).get("is_admin"))
+        self.allowed_function_ids = set(int(item) for item in self.license_data.get("permission_function_ids", []))
+        self.allowed_function_names = set(str(item).strip() for item in self.license_data.get("permission_function_names", []) if str(item).strip())
+        self.purchase_config = self.license_data.get("purchase_config") or {}
         self._dragging = False
         self._drag_pos = QPoint()
-        
-        self.initUI()
+        self._setup_ui()
+        self._patch_runtime_ui()
 
-    def initUI(self):
+    def _setup_ui(self):
         self.setWindowTitle("ECU Hub")
         apply_logo_to_window(self)
         self.setWindowFlags(Qt.FramelessWindowHint | Qt.Window)
@@ -1453,9 +1062,9 @@ class ECUFlashWindow(QMainWindow):
         else:
             self.resize(scaled_px(1722), scaled_px(1100))
         self.setStyleSheet("""
-            QMainWindow { 
-                background-color: #020817; 
-                border: none; 
+            QMainWindow {
+                background-color: #020817;
+                border: none;
                 font-family: Microsoft YaHei;
             }
             QWidget {
@@ -1555,7 +1164,6 @@ class ECUFlashWindow(QMainWindow):
         self.title_bar.mouseMoveEvent = self._title_mouse_move
         self.title_bar.mouseReleaseEvent = self._title_mouse_release
         self.title_bar.mouseDoubleClickEvent = self._title_mouse_double_click
-
         main_layout.addWidget(self.title_bar)
 
         top_bar = QWidget()
@@ -1618,12 +1226,13 @@ class ECUFlashWindow(QMainWindow):
 
         resource_download_btn = QPushButton("文件下载")
         learning_btn = QPushButton("学习资料")
+        wiring_guide_btn = QPushButton("接线图查询")
         checksum_btn = QPushButton("计算校验和")
         purchase_btn = QPushButton("开通功能")
         log_btn = QPushButton("更新说明")
         logout_btn = QPushButton("退出登录")
         self.logout_btn = logout_btn
-        for btn in [resource_download_btn, learning_btn, checksum_btn, purchase_btn, log_btn, logout_btn]:
+        for btn in [resource_download_btn, learning_btn, wiring_guide_btn, checksum_btn, purchase_btn, log_btn, logout_btn]:
             btn.setStyleSheet("""
                 QPushButton {
                     background: qlineargradient(x1:0,y1:0,x2:1,y2:0,stop:0 #FF8800,stop:1 #FFAA00);
@@ -1632,33 +1241,38 @@ class ECUFlashWindow(QMainWindow):
                     font-weight: bold;
                     border: none;
                     border-radius: 5px;
-                    padding: 5px 14px;
-                    min-width: 90px;
+                    padding: 5px 12px;
+                    min-width: 86px;
                     min-height: 28px;
                     max-height: 30px;
                 }
-                QPushButton:hover { background: qlineargradient(x1:0,y1:0,x2:1,y2:0,stop:0 #FF9A00,stop:1 #FFBA2A); }
+                QPushButton:hover {
+                    background: qlineargradient(x1:0,y1:0,x2:1,y2:0,stop:0 #FF9A00,stop:1 #FFBA2A);
+                }
             """)
 
         resource_download_btn.clicked.connect(self.open_resource_download_dialog)
         learning_btn.clicked.connect(self.open_learning_articles_dialog)
+        wiring_guide_btn.clicked.connect(self.open_wiring_guide_dialog)
         checksum_btn.clicked.connect(self.open_checksum_dialog)
         purchase_btn.clicked.connect(lambda: self.show_purchase_dialog())
+        log_btn.clicked.connect(self.show_log_dialog)
 
         btn_layout = QHBoxLayout()
         btn_layout.setSpacing(6)
         btn_layout.addStretch()
         btn_layout.addWidget(resource_download_btn)
         btn_layout.addWidget(learning_btn)
+        btn_layout.addWidget(wiring_guide_btn)
         btn_layout.addWidget(checksum_btn)
         btn_layout.addWidget(purchase_btn)
         btn_layout.addWidget(log_btn)
+        btn_layout.addWidget(logout_btn)
 
         top_layout.addLayout(brand_layout)
         top_layout.addLayout(btn_layout)
         main_layout.addWidget(top_bar)
 
-        # Allow dragging from the whole header area (except interactive buttons).
         for drag_widget in (central_widget, window_shell, top_bar, title_label, sub_label, logo_label):
             drag_widget.mousePressEvent = self._title_mouse_press
             drag_widget.mouseMoveEvent = self._title_mouse_move
@@ -1765,7 +1379,6 @@ class ECUFlashWindow(QMainWindow):
         self.open_btn.clicked.connect(self.open_bin_file)
         self.save_btn.clicked.connect(self.save_bin_file)
         self.save_btn.setEnabled(False)
-        
         for btn in [self.open_btn, self.save_btn]:
             btn.setStyleSheet("""
                 QPushButton {
@@ -1833,7 +1446,6 @@ class ECUFlashWindow(QMainWindow):
         """)
         search_label.setAlignment(Qt.AlignRight | Qt.AlignVCenter)
         self.search_ecu_edit = QLineEdit()
-        self.search_ecu_edit.setText("ME7.8.8")
         self.search_ecu_edit.setStyleSheet("""
             QLineEdit {
                 background-color: rgba(8, 26, 71, 0.98);
@@ -1846,6 +1458,7 @@ class ECUFlashWindow(QMainWindow):
                 max-height: 50px;
             }
         """)
+        self.search_ecu_edit.setPlaceholderText("输入 ECU 型号后回车，例如 ME7.8.8")
         self.search_ecu_edit.returnPressed.connect(self.search_ecu_by_name)
         search_row.addWidget(search_label)
         search_row.addWidget(self.search_ecu_edit)
@@ -1863,7 +1476,6 @@ class ECUFlashWindow(QMainWindow):
             }
         """)
         car_label.setAlignment(Qt.AlignRight | Qt.AlignVCenter)
-
         self.car_combobox = InlineSelect("请选择车系")
         self.car_combobox.addItems(ECU_DATABASE.keys())
         self.car_combobox.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
@@ -1886,7 +1498,6 @@ class ECUFlashWindow(QMainWindow):
             }
         """)
         ecu_label.setAlignment(Qt.AlignRight | Qt.AlignVCenter)
-
         self.ecu_combobox = InlineSelect("请选择ECU型号")
         self.ecu_combobox.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
         self.ecu_combobox.setMaxVisibleItems(8)
@@ -1946,8 +1557,21 @@ class ECUFlashWindow(QMainWindow):
         """)
         right_layout.addWidget(func_title)
 
-        self.func_tip_label = QLabel("")
-        self.func_tip_label.hide()
+        self.func_tip_label = QLabel("提示：请打开文件后 点击ECU识别再操作功能")
+        self.func_tip_label.setStyleSheet("""
+            QLabel {
+                font-size: 14px;
+                color: #F3D86A;
+                text-align: left;
+                padding: 12px 14px;
+                background-color: rgba(16, 41, 96, 0.58);
+                border: 1px solid rgba(99, 141, 220, 0.45);
+                border-radius: 10px;
+                margin: 6px 0 4px 0;
+            }
+        """)
+        self.func_tip_label.setAlignment(Qt.AlignLeft | Qt.AlignVCenter)
+        right_layout.addWidget(self.func_tip_label)
 
         self.func_scroll = QScrollArea()
         self.func_scroll.setWidgetResizable(True)
@@ -1955,37 +1579,25 @@ class ECUFlashWindow(QMainWindow):
         self.func_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
         self.func_scroll.setVerticalScrollBarPolicy(Qt.ScrollBarAsNeeded)
         self.func_scroll.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
-        self.func_scroll.setFixedHeight(scaled_px(420))
+        self.func_scroll.setFixedHeight(scaled_px(430))
         self.func_scroll.setStyleSheet("""
             QScrollArea {
                 background-color: rgba(8, 22, 52, 0.88);
                 border: 1px solid rgba(73, 112, 196, 0.34);
                 border-radius: 16px;
             }
-            QScrollBar:vertical {
-                background: rgba(6, 23, 78, 0.65);
-                width: 10px;
-                margin: 8px 4px 8px 0;
-                border-radius: 5px;
-            }
-            QScrollBar::handle:vertical {
-                background: rgba(96, 165, 250, 0.72);
-                min-height: 30px;
-                border-radius: 5px;
-            }
-            QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical {
-                height: 0px;
-            }
         """)
         self.func_content = QWidget()
         self.func_content.setStyleSheet("background: transparent; border: none;")
         self.func_content_layout = QVBoxLayout(self.func_content)
-        self.func_content_layout.setContentsMargins(12, 16, 12, 16)
-        self.func_content_layout.setSpacing(scaled_px(20))
+        self.func_content_layout.setContentsMargins(16, 16, 16, 16)
+        self.func_content_layout.setSpacing(scaled_px(14))
         self.func_content_layout.setAlignment(Qt.AlignTop)
         self.func_scroll.setWidget(self.func_content)
         right_layout.addWidget(self.func_scroll)
         self.show_default_step3_button()
+
+        right_layout.addStretch()
 
         main_content_layout.addWidget(left_panel)
         main_content_layout.addWidget(right_panel)
@@ -1998,41 +1610,10 @@ class ECUFlashWindow(QMainWindow):
             QLabel {
                 font-size: 14px;
                 color: #00FF99;
-                text-shadow: 0 0 6px #00FF99; 
                 margin-top: 8px;
             }
         """)
         main_layout.addWidget(auth_label, alignment=Qt.AlignRight)
-
-    def search_ecu_by_name(self):
-        keyword = self.search_ecu_edit.text().strip()
-        if not keyword:
-            return
-
-        found_car = None
-        found_ecu = None
-
-        for car_type, ecu_list in ECU_DATABASE.items():
-            for ecu_name in ecu_list.keys():
-                if keyword in ecu_name:
-                    found_car = car_type
-                    found_ecu = ecu_name
-                    break
-            if found_car:
-                break
-
-        if not found_car or not found_ecu:
-            msg = create_branded_message_box(self)
-            msg.setIcon(QMessageBox.Warning)
-            msg.setText("输入错误！")
-            msg.setStyleSheet("QLabel{color:black; font-size:14px;} QPushButton{background:#0078D7; color:white;}")
-            msg.exec_()
-            return
-
-        self.car_combobox.setCurrentText(found_car)
-        self.update_ecu_combobox(found_car)
-        self.ecu_combobox.setCurrentText(found_ecu)
-        self.add_operation_log(f"搜索定位：{found_car} → {found_ecu}")
 
     def open_checksum_dialog(self):
         dialog = ChecksumDialog(self)
@@ -2318,13 +1899,13 @@ class ECUFlashWindow(QMainWindow):
         dialog = QDialog(self)
         dialog.setWindowTitle("学习资料")
         apply_logo_to_window(dialog)
-        dialog.resize(960, 720)
+        dialog.resize(1120, 820)
         dialog.setStyleSheet(
             "QDialog{background:#060B16;} QLabel{color:#E5E7EB;} "
             "QPushButton{background:#2563EB;color:white;border:none;border-radius:8px;padding:10px 18px;font-size:14px;font-weight:bold;} "
             "QLineEdit{background:rgba(3,10,28,0.96);color:#E5E7EB;border:1px solid rgba(96,165,250,0.35);border-radius:8px;padding:12px 14px;font-size:18px;} "
             "QListWidget{background:rgba(8,24,64,0.94);color:#E5E7EB;border:1px solid rgba(76,133,231,0.40);border-radius:12px;font-size:15px;} "
-            "QListWidget::item{padding:10px 12px;} QListWidget::item:selected{background:#1D4ED8;}"
+            "QListWidget::item{padding:12px 14px;} QListWidget::item:selected{background:#1D4ED8;}"
         )
         layout = QVBoxLayout(dialog)
         layout.setContentsMargins(24, 24, 24, 24)
@@ -2343,7 +1924,7 @@ class ECUFlashWindow(QMainWindow):
         layout.addWidget(result_label)
 
         list_widget = QListWidget(dialog)
-        list_widget.setIconSize(QSize(scaled_px(96), scaled_px(72)))
+        list_widget.setIconSize(QSize(scaled_px(120), scaled_px(90)))
         layout.addWidget(list_widget)
 
         selected_items = []
@@ -2369,12 +1950,12 @@ class ECUFlashWindow(QMainWindow):
                 title_text = item.get("title") or "未命名学习资料"
                 summary_text = item.get("summary") or "暂无摘要"
                 summary_text = re.sub(r"\s+", " ", str(summary_text)).strip()
-                if len(summary_text) > 36:
-                    summary_text = summary_text[:36] + "..."
+                if len(summary_text) > 46:
+                    summary_text = summary_text[:46] + "..."
                 list_item = QListWidgetItem(f"{title_text}\n{summary_text}")
                 cover_pixmap = self._load_remote_pixmap(item.get("cover_image_url"))
                 if cover_pixmap and not cover_pixmap.isNull():
-                    list_item.setIcon(QIcon(cover_pixmap.scaled(96, 72, Qt.KeepAspectRatioByExpanding, Qt.SmoothTransformation)))
+                    list_item.setIcon(QIcon(cover_pixmap.scaled(120, 90, Qt.KeepAspectRatioByExpanding, Qt.SmoothTransformation)))
                 list_widget.addItem(list_item)
 
         def open_selected_article():
@@ -2403,7 +1984,7 @@ class ECUFlashWindow(QMainWindow):
         dialog = QDialog(self)
         dialog.setWindowTitle(item.get("title") or "学习资料")
         apply_logo_to_window(dialog)
-        dialog.resize(980, 760)
+        dialog.resize(1280, 920)
         dialog.setStyleSheet(
             "QDialog{background:#060B16;} QLabel{color:#E5E7EB;} "
             "QPushButton{background:#2563EB;color:white;border:none;border-radius:8px;padding:10px 18px;font-size:14px;font-weight:bold;} "
@@ -2415,13 +1996,17 @@ class ECUFlashWindow(QMainWindow):
 
         title_text = item.get("title") or "未命名学习资料"
         title_label = QLabel(title_text)
-        title_label.setStyleSheet("font-size:22px;font-weight:bold;color:#93C5FD;")
+        title_label.setStyleSheet("font-size:24px;font-weight:bold;color:#93C5FD;")
         layout.addWidget(title_label)
 
         subtitle = QLabel(item.get("summary") or "暂无摘要")
         subtitle.setWordWrap(True)
-        subtitle.setStyleSheet("font-size:13px;color:#94A3B8;")
+        subtitle.setStyleSheet("font-size:14px;color:#94A3B8;")
         layout.addWidget(subtitle)
+
+        tip_label = QLabel("双击正文图片可放大查看")
+        tip_label.setStyleSheet("font-size:13px;color:#7DD3FC;")
+        layout.addWidget(tip_label)
 
         content_frame = QFrame()
         content_layout = QVBoxLayout(content_frame)
@@ -2429,29 +2014,31 @@ class ECUFlashWindow(QMainWindow):
         content_layout.setSpacing(12)
 
         info_title = QLabel("图文内容")
-        info_title.setStyleSheet("font-size:16px;font-weight:bold;color:#CFE4FF;")
+        info_title.setStyleSheet("font-size:17px;font-weight:bold;color:#CFE4FF;")
         content_layout.addWidget(info_title)
 
         article_html = _normalize_learning_article_html(item.get('content_html') or '')
+        embedded_images = _extract_embedded_images_from_html(article_html)
 
-        content_view = QTextBrowser()
+        content_view = ArticleTextBrowser()
+        content_view.set_embedded_images(embedded_images)
         content_view.setOpenExternalLinks(True)
         content_view.setOpenLinks(True)
-        content_view.setStyleSheet("background:rgba(3,10,28,0.96);color:#E5E7EB;border:none;font-size:14px;padding:8px;")
+        content_view.setStyleSheet("background:rgba(3,10,28,0.96);color:#E5E7EB;border:none;font-size:16px;padding:12px;")
         content_view.document().setDefaultStyleSheet(
             "html,body{background:transparent;color:#E5E7EB;}"
-            "p,div,span,li,td,th{background:transparent;color:#E5E7EB;line-height:1.9;}"
-            "h1,h2,h3,h4,h5,h6{background:transparent;color:#CFE4FF;margin:18px 0 10px 0;}"
+            "p,div,span,li,td,th{background:transparent;color:#E5E7EB;line-height:2.0;font-size:16px;}"
+            "h1,h2,h3,h4,h5,h6{background:transparent;color:#CFE4FF;margin:22px 0 12px 0;}"
             "a{color:#7DD3FC;}"
-            "table{width:100%;background:transparent;border-collapse:collapse;color:#E5E7EB;margin:12px 0;}"
-            "td,th{border:1px solid rgba(148,163,184,0.35);padding:8px;}"
-            "img{display:block;background:transparent;border-radius:12px;max-width:260px;max-height:360px;width:auto;height:auto;margin:10px auto;}"
-            "ul,ol{margin:8px 0 8px 20px;}"
+            "table{width:100%;background:transparent;border-collapse:collapse;color:#E5E7EB;margin:14px 0;}"
+            "td,th{border:1px solid rgba(148,163,184,0.35);padding:10px;}"
+            "img{display:block;background:transparent;border-radius:12px;max-width:340px;max-height:460px;width:auto;height:auto;margin:14px auto;}"
+            "ul,ol{margin:10px 0 10px 22px;}"
             "blockquote{border-left:3px solid rgba(125,211,252,0.55);padding-left:12px;color:#CBD5E1;}"
         )
         content_view.setHtml(
             "<html><body style='background:transparent;color:#E5E7EB;'>"
-            f"<div style='color:#E5E7EB;font-size:14px;line-height:1.9;'>{article_html or '<p>暂无图文内容</p>'}</div>"
+            f"<div style='color:#E5E7EB;font-size:16px;line-height:2.0;'>{article_html or '<p>暂无图文内容</p>'}</div>"
             "</body></html>"
         )
         content_layout.addWidget(content_view, 1)
@@ -2492,79 +2079,17 @@ class ECUFlashWindow(QMainWindow):
 
         expanded = []
         for candidate_name, candidate_info in ECU_DATABASE[car_type].items():
-            if self._ecu_family_key(candidate_name) == family_key:
-                expanded.append({
+            if self._ecu_family_key(candidate_name) != family_key:
+                continue
+            expanded.append(
+                {
                     "car_type": car_type,
                     "ecu_name": candidate_name,
                     "ecu_info": candidate_info,
                     "identify_code": identify_code,
-                })
+                }
+            )
         return expanded or [selected_match]
-
-    def select_ecu_candidate(self, matches):
-        if not matches:
-            return None
-        if len(matches) == 1:
-            return matches[0]
-
-        dialog = QDialog(self)
-        dialog.setWindowTitle("选择ECU型号")
-        apply_logo_to_window(dialog)
-        dialog.resize(640, 420)
-        dialog.setStyleSheet("""
-            QDialog{background:#0B1F55;}
-            QLabel{color:#CFE4FF; font-size:15px; font-weight:bold;}
-            QListWidget{
-                background:#0A245F;
-                color:#E8F1FF;
-                border:1px solid rgba(90, 139, 226, 0.72);
-                border-radius:8px;
-                font-size:14px;
-            }
-            QListWidget::item{padding:8px 10px; min-height:26px;}
-            QListWidget::item:selected{background:#2F69E8; color:white;}
-            QPushButton{
-                color:white;
-                background:qlineargradient(x1:0,y1:0,x2:1,y2:0,stop:0 #2A65EE,stop:1 #3F8CFF);
-                border:1px solid rgba(157, 199, 255, 0.38);
-                border-radius:8px;
-                min-width:90px;
-                padding:6px 10px;
-                font-weight:bold;
-            }
-            QPushButton:hover{
-                background:qlineargradient(x1:0,y1:0,x2:1,y2:0,stop:0 #3A74F5,stop:1 #51A0FF);
-            }
-        """)
-
-        layout = QVBoxLayout(dialog)
-        tip = QLabel("识别到多个匹配 ECU，请选择具体型号：")
-        layout.addWidget(tip)
-
-        list_widget = QListWidget(dialog)
-        for match in matches:
-            list_widget.addItem(f"{match['car_type']}  {match['ecu_name']}")
-        list_widget.setCurrentRow(0)
-        list_widget.itemDoubleClicked.connect(lambda _: dialog.accept())
-        layout.addWidget(list_widget)
-
-        btn_row = QHBoxLayout()
-        btn_row.addStretch()
-        cancel_btn = QPushButton("取消")
-        ok_btn = QPushButton("确定")
-        cancel_btn.clicked.connect(dialog.reject)
-        ok_btn.clicked.connect(dialog.accept)
-        btn_row.addWidget(cancel_btn)
-        btn_row.addWidget(ok_btn)
-        layout.addLayout(btn_row)
-
-        if dialog.exec_() != QDialog.Accepted:
-            return None
-
-        row = list_widget.currentRow()
-        if row < 0 or row >= len(matches):
-            return None
-        return matches[row]
 
     def toggle_max_restore(self):
         if self.isMaximized():
@@ -2601,7 +2126,6 @@ class ECUFlashWindow(QMainWindow):
     def add_operation_log(self, log_content):
         if not log_content:
             return
-            
         timestamp = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
         current_log = self.operation_log_area.toPlainText()
         new_log = f"{current_log}\n[{timestamp}] {log_content}" if current_log else f"[{timestamp}] {log_content}"
@@ -2613,23 +2137,14 @@ class ECUFlashWindow(QMainWindow):
     def _debug_print_dataset_and_matches(self):
         try:
             car_series_count = len(ECU_DATABASE) if isinstance(ECU_DATABASE, dict) else 0
-            ecu_model_count = (
-                sum(len(v) for v in ECU_DATABASE.values())
-                if isinstance(ECU_DATABASE, dict)
-                else 0
-            )
-            print(
-                f"[CLIENT] DATASET SUMMARY car_series={car_series_count}, "
-                f"ecu_models={ecu_model_count}"
-            )
-
+            ecu_model_count = sum(len(v) for v in ECU_DATABASE.values()) if isinstance(ECU_DATABASE, dict) else 0
+            print(f"[CLIENT] DATASET SUMMARY car_series={car_series_count}, ecu_models={ecu_model_count}")
             if not isinstance(ECU_DATABASE, dict):
                 print("[CLIENT] ECU_DATABASE is not a dict, skip match debug.")
                 return
             if not self.file_data:
                 print("[CLIENT] BIN is empty, skip match debug.")
                 return
-
             matches = []
             for car_type, ecu_list in ECU_DATABASE.items():
                 for ecu_name, ecu_info in ecu_list.items():
@@ -2640,53 +2155,29 @@ class ECUFlashWindow(QMainWindow):
                         expected_hex = str(identify_item.get("hex_value", "")).upper()
                         if addr < 0 or length <= 0 or (addr + length) > len(self.file_data):
                             continue
-                        read_hex = (
-                            binascii.hexlify(self.file_data[addr:addr + length])
-                            .decode("utf-8")
-                            .upper()
-                        )
+                        read_hex = binascii.hexlify(self.file_data[addr:addr + length]).decode("utf-8").upper()
                         if read_hex == expected_hex:
-                            matches.append(
-                                {
-                                    "car_type": car_type,
-                                    "ecu_name": ecu_name,
-                                    "addr": addr,
-                                    "length": length,
-                                    "hex": read_hex,
-                                }
-                            )
+                            matches.append({"car_type": car_type, "ecu_name": ecu_name, "addr": addr, "length": length, "hex": read_hex})
                             break
-
             print(f"[CLIENT] BIN MATCH COUNT {len(matches)}")
-            for item in matches[:20]:
-                print(
-                    "[CLIENT] MATCH "
-                    f"{item['car_type']} / {item['ecu_name']} "
-                    f"addr=0x{item['addr']:X} len={item['length']} hex={item['hex']}"
-                )
         except Exception as e:
             print(f"[CLIENT] DEBUG ERROR {e}")
 
     def open_bin_file(self):
-        file_path, _ = QFileDialog.getOpenFileName(
-            self, "打开BIN文件", "", "BIN文件 (*.bin);;所有文件 (*.*)"
-        )
+        file_path, _ = QFileDialog.getOpenFileName(self, "打开BIN文件", "", "BIN文件 (*.bin);;所有文件 (*.*)")
         if file_path:
             try:
                 with open(file_path, 'rb') as f:
                     self.file_data = f.read()
                 self.file_path = file_path
-                
                 self.file_path_edit.setText(file_path)
                 file_size = len(self.file_data)
                 self.file_size_label.setText(f"大小：{file_size} 字节 ({file_size/1024:.2f} KB)")
                 self.identify_btn.setEnabled(True)
                 self.save_btn.setEnabled(False)
                 self._debug_print_dataset_and_matches()
-                
                 self.add_operation_log(f"成功打开文件：{file_path}")
                 self.add_operation_log(f"文件大小：{file_size} 字节 ({file_size/1024:.2f} KB)")
-                
                 self.result_label.setText("识别结果：等待识别")
                 self.current_ecu_info = None
                 self.current_car_type = ""
@@ -2695,7 +2186,6 @@ class ECUFlashWindow(QMainWindow):
                 self.clear_function_buttons()
                 self.show_default_step3_button()
                 self.func_tip_label.show()
-                
             except Exception as e:
                 msg = create_branded_message_box(self)
                 msg.setIcon(QMessageBox.Critical)
@@ -2712,21 +2202,18 @@ class ECUFlashWindow(QMainWindow):
             msg.setStyleSheet("QLabel{color:black;} QPushButton{color:white; background:#0078D7;}")
             msg.exec_()
             return
-        
-        # 生成规范文件名
+
         computer_name = get_computer_name()
         random_num = generate_random_num()
         operation_type = "ECU修改"
         if self.current_ecu_name:
             operation_type = f"{self.current_ecu_name}_修复"
-            
+
         default_filename = f"ECUflash_{computer_name}_{operation_type}_{random_num}.bin"
         desktop_path = os.path.join(os.path.expanduser("~"), "Desktop")
         default_path = os.path.join(desktop_path, default_filename)
-        
-        save_path, _ = QFileDialog.getSaveFileName(
-            self, "保存文件", default_path, "BIN文件 (*.bin);;所有文件 (*.*)"
-        )
+
+        save_path, _ = QFileDialog.getSaveFileName(self, "保存文件", default_path, "BIN文件 (*.bin);;所有文件 (*.*)")
         if save_path:
             try:
                 with open(save_path, 'wb') as f:
@@ -2754,47 +2241,32 @@ class ECUFlashWindow(QMainWindow):
     def identify_ecu(self):
         try:
             if not self.file_data:
-                msg = create_branded_message_box(self)
-                msg.setIcon(QMessageBox.Warning)
-                msg.setText("请先打开BIN文件")
-                msg.setStyleSheet("QLabel{color:black;} QPushButton{color:white; background:#0078D7;}")
-                msg.exec_()
+                show_message(self, QMessageBox.Warning, "提示", "请先打开BIN文件")
                 return
-                
             if len(self.file_data) == 0:
-                msg = create_branded_message_box(self)
-                msg.setIcon(QMessageBox.Warning)
-                msg.setText("暂不支持该ECU的数据 请联系售后")
-                msg.setStyleSheet("QLabel{color:black;} QPushButton{color:white; background:#0078D7;}")
-                msg.exec_()
+                show_message(self, QMessageBox.Warning, "提示", "暂不支持该ECU的数据 请联系售后")
                 self.result_label.setText("识别结果：识别失败")
                 self.add_operation_log("ECU识别失败：文件为空")
                 self.clear_function_buttons()
                 self.show_default_step3_button()
                 self.func_tip_label.show()
                 return
-                
+
             matches = []
             seen = set()
-            
-            # 遍历所有ECU，匹配特征
             for car_type, ecu_list in ECU_DATABASE.items():
                 for ecu_name, ecu_info in ecu_list.items():
                     identify_list = ecu_info.get("identify", [])
                     if not identify_list:
                         continue
-                    
                     for identify_item in identify_list:
                         addr = identify_item.get("addr", 0)
                         length = identify_item.get("length", 0)
                         expected_hex = identify_item.get("hex_value", "")
-                        
                         if addr < 0 or length <= 0 or (addr + length) > len(self.file_data):
                             continue
-                        
                         read_data = self.file_data[addr:addr+length]
                         read_hex = binascii.hexlify(read_data).decode('utf-8').upper()
-                        
                         if read_hex == expected_hex.upper():
                             key = (car_type, ecu_name, read_hex)
                             if key not in seen:
@@ -2806,13 +2278,9 @@ class ECUFlashWindow(QMainWindow):
                                     "identify_code": read_hex,
                                 })
                             break
-            
+
             if not matches:
-                msg = create_branded_message_box(self)
-                msg.setIcon(QMessageBox.Warning)
-                msg.setText("暂不支持该ECU的数据 请联系售后")
-                msg.setStyleSheet("QLabel{color:black;} QPushButton{color:white; background:#0078D7;}")
-                msg.exec_()
+                show_message(self, QMessageBox.Warning, "提示", "暂不支持该ECU的数据 请联系售后")
                 self.result_label.setText("识别结果：识别失败")
                 self.add_operation_log("ECU识别失败：暂不支持该ECU数据")
                 self.clear_function_buttons()
@@ -2820,7 +2288,9 @@ class ECUFlashWindow(QMainWindow):
                 self.func_tip_label.show()
                 return
 
-            selected_match = self.select_ecu_candidate(matches)
+            selected_match = matches[0]
+            if len(matches) > 1:
+                selected_match = self.select_ecu_candidate(matches)
             if selected_match and len(matches) == 1:
                 family_candidates = self._expand_same_family_candidates(selected_match)
                 if len(family_candidates) > 1:
@@ -2833,43 +2303,28 @@ class ECUFlashWindow(QMainWindow):
             match_ecu_name = selected_match["ecu_name"]
             match_ecu_info = selected_match["ecu_info"]
             match_identify_code = selected_match["identify_code"]
-            
-            # 识别成功
+
             self.current_ecu_info = match_ecu_info
             self.current_car_type = match_car_type
             self.current_ecu_name = match_ecu_name
             self.current_identify_code = match_identify_code
-            
+
             success_msg = create_branded_message_box(self)
             success_msg.setIcon(QMessageBox.Information)
             success_msg.setWindowTitle("识别成功")
             success_msg.setText(f"已识别到ECU型号为：{match_car_type} {match_ecu_name}")
-            success_msg.setStyleSheet("""
-                QLabel{color:black; font-size:16px; font-weight:bold;} 
-                QPushButton{background:#0078D7; color:white; font-size:14px; padding:8px 20px;}
-            """)
+            success_msg.setStyleSheet("QLabel{color:black; font-size:16px; font-weight:bold;} QPushButton{background:#0078D7; color:white; font-size:14px; padding:8px 20px;}")
             success_msg.exec_()
-            
+
             self.car_combobox.setCurrentText(match_car_type)
             self.update_ecu_combobox(match_car_type)
             self.ecu_combobox.setCurrentText(match_ecu_name)
-            
             self.result_label.setText(f"识别结果：识别成功 - {match_car_type} {match_ecu_name}")
             self.add_operation_log(f"ECU识别成功：{match_car_type} - {match_ecu_name}")
-            
-            self.load_function_buttons(match_ecu_info["functions"])
-            
+            self.load_function_buttons(match_ecu_info.get("functions", {}))
         except Exception as e:
-            msg = create_branded_message_box(self)
-            msg.setIcon(QMessageBox.Warning)
-            msg.setText("暂不支持该ECU的数据 请联系售后")
-            msg.setStyleSheet("QLabel{color:black;} QPushButton{color:white; background:#0078D7;}")
-            msg.exec_()
-            self.result_label.setText("识别结果：识别失败")
-            self.add_operation_log(f"ECU识别异常：{str(e)}")
-            self.clear_function_buttons()
-            self.show_default_step3_button()
-            self.func_tip_label.show()
+            show_message(self, QMessageBox.Critical, "错误", f"识别 ECU 失败：{e}")
+            self.add_operation_log(f"识别 ECU 失败：{e}")
 
     def clear_function_buttons(self):
         while self.func_content_layout.count():
@@ -2889,35 +2344,11 @@ class ECUFlashWindow(QMainWindow):
         button.setIcon(_get_function_icon(title, 104, muted=(not is_allowed and not placeholder)))
         button.setIconSize(QSize(scaled_px(104), scaled_px(104)))
         button.setToolButtonStyle(Qt.ToolButtonTextUnderIcon)
-        button.setStyleSheet("""
-            QToolButton {
-                background: qlineargradient(x1:0,y1:0,x2:1,y2:1,
-                    stop:0 rgba(8, 41, 108, 0.98),
-                    stop:0.55 rgba(10, 66, 162, 0.96),
-                    stop:1 rgba(6, 23, 78, 0.98));
-                color: #EAF4FF;
-                font-size: 16px;
-                font-weight: 700;
-                border: 1px solid rgba(96, 165, 250, 0.42);
-                border-radius: 18px;
-                padding: 10px 12px 10px 12px;
-                text-align: center;
-                line-height: 1.5;
-            }
-            QToolButton:hover:enabled {
-                background: qlineargradient(x1:0,y1:0,x2:1,y2:1,
-                    stop:0 rgba(11, 57, 143, 1.0),
-                    stop:0.55 rgba(18, 90, 205, 0.98),
-                    stop:1 rgba(7, 34, 110, 1.0));
-                border: 1px solid rgba(125, 211, 252, 0.78);
-            }
-            QToolButton:pressed:enabled {
-                background: qlineargradient(x1:0,y1:0,x2:1,y2:1,
-                    stop:0 rgba(7, 35, 94, 1.0),
-                    stop:0.55 rgba(9, 60, 148, 1.0),
-                    stop:1 rgba(5, 20, 68, 1.0));
-            }
-        """)
+        button.setStyleSheet(
+            "QToolButton{background:qlineargradient(x1:0,y1:0,x2:1,y2:1,stop:0 rgba(8,41,108,0.98),stop:0.55 rgba(10,66,162,0.96),stop:1 rgba(6,23,78,0.98));color:#EAF4FF;font-size:16px;font-weight:700;border:1px solid rgba(96,165,250,0.42);border-radius:18px;padding:10px 12px 10px 12px;text-align:center;line-height:1.5;}"
+            "QToolButton:hover:enabled{background:qlineargradient(x1:0,y1:0,x2:1,y2:1,stop:0 rgba(11,57,143,1.0),stop:0.55 rgba(18,90,205,0.98),stop:1 rgba(7,34,110,1.0));border:1px solid rgba(125,211,252,0.78);}"
+            "QToolButton:pressed:enabled{background:qlineargradient(x1:0,y1:0,x2:1,y2:1,stop:0 rgba(7,35,94,1.0),stop:0.55 rgba(9,60,148,1.0),stop:1 rgba(5,20,68,1.0));}"
+        )
         if not is_allowed and not placeholder:
             button.setStyleSheet(button.styleSheet() + "QToolButton{color:rgba(190,198,210,0.92);background:qlineargradient(x1:0,y1:0,x2:1,y2:1,stop:0 rgba(43,50,63,0.98),stop:0.55 rgba(64,73,88,0.96),stop:1 rgba(34,40,52,0.98));border:1px solid rgba(148,163,184,0.28);} QToolButton:hover:enabled{background:qlineargradient(x1:0,y1:0,x2:1,y2:1,stop:0 rgba(55,64,80,0.98),stop:0.55 rgba(76,87,105,0.96),stop:1 rgba(45,52,66,0.98));border:1px solid rgba(168,180,197,0.38);}")
         if not placeholder:
@@ -2956,22 +2387,17 @@ class ECUFlashWindow(QMainWindow):
         self.refresh_user_permissions(silent=True)
         self.clear_function_buttons()
         self.func_tip_label.hide()
-
         self.func_scroll.verticalScrollBar().setValue(0)
         cards = self._append_builtin_cards()
-
         runtime_functions = functions if isinstance(functions, dict) else {}
         all_function_names = list(ALL_FUNCTION_NAMES or [])
-
         if not all_function_names:
             all_function_names = _collect_all_function_names(ECU_DATABASE)
-
         if not all_function_names:
             if not runtime_functions:
                 self.show_default_step3_button()
                 return
             all_function_names = list(runtime_functions.keys())
-
         for func_name in all_function_names:
             runtime_func_info = dict(runtime_functions.get(func_name) or {})
             runtime_func_info.setdefault("name", func_name)
@@ -2983,7 +2409,6 @@ class ECUFlashWindow(QMainWindow):
                     on_click=lambda checked=False, fn=func_name, fi=runtime_func_info: self.execute_function(fn, fi),
                 )
             )
-
         row_cards = []
         for card in cards:
             row_cards.append(card)
@@ -3004,15 +2429,9 @@ class ECUFlashWindow(QMainWindow):
                 self.add_operation_log(f"功能执行被拦截：{func_name}（无权限）")
                 self.show_purchase_dialog(func_name)
                 return
-
             if not self.file_data or not self.current_ecu_info or not self.current_identify_code:
-                msg = create_branded_message_box(self)
-                msg.setIcon(QMessageBox.Warning)
-                msg.setText("请先打开文件并识别ECU")
-                msg.setStyleSheet("QLabel{color:black;} QPushButton{color:white; background:#0078D7;}")
-                msg.exec_()
+                show_message(self, QMessageBox.Warning, "提示", "请先打开文件并识别ECU")
                 return
-
             disclaimer_box = create_branded_message_box(self)
             disclaimer_box.setIcon(QMessageBox.Warning)
             disclaimer_box.setWindowTitle("警告")
@@ -3029,14 +2448,8 @@ class ECUFlashWindow(QMainWindow):
             disagree_btn = disclaimer_box.addButton("不同意", QMessageBox.RejectRole)
             disclaimer_box.setStyleSheet("QLabel{color:black; font-size:13px;}")
             button_style = (
-                "QPushButton{"
-                "color:white;"
-                "background:qlineargradient(x1:0,y1:0,x2:1,y2:0,stop:0 #2A65EE,stop:1 #3F8CFF);"
-                "border:1px solid rgba(157, 199, 255, 0.38);"
-                "border-radius:8px;"
-                "min-width:220px; padding:7px 10px; font-weight:bold;}"
-                "QPushButton:hover{"
-                "background:qlineargradient(x1:0,y1:0,x2:1,y2:0,stop:0 #3A74F5,stop:1 #51A0FF);}"
+                "QPushButton{color:white;background:qlineargradient(x1:0,y1:0,x2:1,y2:0,stop:0 #2A65EE,stop:1 #3F8CFF);border:1px solid rgba(157,199,255,0.38);border-radius:8px;min-width:220px; padding:7px 10px; font-weight:bold;}"
+                "QPushButton:hover{background:qlineargradient(x1:0,y1:0,x2:1,y2:0,stop:0 #3A74F5,stop:1 #51A0FF);}"
             )
             agree_btn.setStyleSheet(button_style)
             disagree_btn.setStyleSheet(button_style)
@@ -3044,239 +2457,42 @@ class ECUFlashWindow(QMainWindow):
             if disclaimer_box.clickedButton() != agree_btn:
                 self.add_operation_log(f"执行功能取消：{func_name}（未同意免责声明）")
                 return
-            
-            # 获取对应版本的修改逻辑
+
             modifications_map = func_info.get("modifications_map", {})
             modifications = modifications_map.get(self.current_identify_code, [])
-
             idle_rpm = None
             if func_name == "怠速调整":
-                value, ok = QInputDialog.getInt(
-                    self,
-                    "怠速调整",
-                    "请输入目标怠速（800~1000）",
-                    850,
-                    800,
-                    1000,
-                    10,
-                )
+                value, ok = QInputDialog.getInt(self, "怠速调整", "请输入目标怠速（800~1000）", 850, 800, 1000, 10)
                 if not ok:
                     self.add_operation_log("怠速调整取消：用户未输入目标怠速")
                     return
                 idle_rpm = value
-            
             if not modifications:
-                msg = create_branded_message_box(self)
-                msg.setIcon(QMessageBox.Warning)
-                msg.setText("该版本暂无修改逻辑")
-                msg.setStyleSheet("QLabel{color:black;} QPushButton{color:white; background:#0078D7;}")
-                msg.exec_()
+                show_message(self, QMessageBox.Warning, "提示", "该版本暂无修改逻辑")
                 return
-            
             data_array = bytearray(self.file_data)
-            
             for mod in modifications:
                 addr = mod.get("addr", 0)
                 length = mod.get("length", 0)
                 value_hex = mod.get("value", "")
-
                 if func_name == "怠速调整" and idle_rpm is not None:
                     idle_map = _encode_idle_value_hex(idle_rpm)
                     if length in idle_map:
                         value_hex = idle_map[length]
-                
-                if addr < 0 or length <=0 or (addr+length) > len(data_array):
+                if addr < 0 or length <= 0 or (addr + length) > len(data_array):
                     continue
-                
                 value_bytes = binascii.unhexlify(value_hex)
                 data_array[addr:addr+length] = value_bytes
-            
             self.file_data = bytes(data_array)
             self.save_btn.setEnabled(True)
-            
-            success_text = func_info["success_msg"]
+            success_text = func_info.get("success_msg", "修改成功")
             if func_name == "怠速调整" and idle_rpm is not None:
                 success_text = f"怠速已调整为 {idle_rpm} RPM，请保存文件。"
-            msg = create_branded_message_box(self)
-            msg.setIcon(QMessageBox.Information)
-            msg.setText(success_text)
-            msg.setStyleSheet("QLabel{color:black;} QPushButton{color:white; background:#0078D7;}")
-            msg.exec_()
+            show_message(self, QMessageBox.Information, "成功", success_text)
             self.add_operation_log(f"执行功能成功：{func_name}" + (f" -> {idle_rpm}RPM" if idle_rpm is not None else ""))
-            
         except Exception as e:
-            msg = create_branded_message_box(self)
-            msg.setIcon(QMessageBox.Critical)
-            msg.setText(f"执行功能失败：{str(e)}")
-            msg.setStyleSheet("QLabel{color:black;} QPushButton{color:white; background:#0078D7;}")
-            msg.exec_()
+            show_message(self, QMessageBox.Critical, "错误", f"执行功能失败：{str(e)}")
             self.add_operation_log(f"执行功能失败：{func_name} - {str(e)}")
-
-
-def show_message(parent, icon, title, text, info_text=""):
-    message_box = create_branded_message_box(parent)
-    message_box.setIcon(icon)
-    message_box.setWindowTitle(title)
-    message_box.setText(text)
-    if info_text:
-        message_box.setInformativeText(info_text)
-    message_box.setStyleSheet(
-        "QLabel{color:black; font-size:14px;} "
-        "QPushButton{color:white; background:#0078D7; min-width:96px; padding:6px 12px;}"
-    )
-    message_box.exec_()
-
-
-def _encode_idle_value_hex(idle_rpm):
-    base = int(idle_rpm)
-    low = base & 0xFF
-    high = (base >> 8) & 0xFF
-    single = f"{low:02X}"
-    pair = f"{low:02X}{high:02X}"
-    block12 = pair * 12
-    return {
-        1: single,
-        2: pair,
-        24: block12,
-    }
-
-
-class MergedChecksumDialog(ChecksumDialog):
-    def __init__(self, parent=None):
-        super().__init__(parent)
-        self.cpu_combobox.clear()
-        self.cpu_combobox.addItems(CPU_DISPLAY_TO_KEY.keys())
-        self.cpu_combobox.setCurrentIndex(0)
-
-    def calculate_and_save(self):
-        if not self.original_file_data:
-            self.status_label.setText("状态：请先加载原始数据")
-            show_message(self, QMessageBox.Warning, "提示", "请先加载原始数据！")
-            return
-
-        if not self.modified_file_data:
-            self.status_label.setText("状态：请先加载修改后数据")
-            show_message(self, QMessageBox.Warning, "提示", "请先加载修改后数据！")
-            return
-
-        cpu_display_name = self.cpu_combobox.currentText()
-        cpu_key = CPU_DISPLAY_TO_KEY[cpu_display_name]
-        checksum_offset = ECU_CPU_MAP[cpu_key]
-        ok, output_data = calculate_checksum(
-            bytearray(self.original_file_data),
-            bytearray(self.modified_file_data),
-            checksum_offset,
-        )
-        if not ok:
-            self.status_label.setText("状态：校验和计算失败")
-            show_message(self, QMessageBox.Critical, "错误", "数据错误，请重新加载数据！")
-            return
-
-        computer_name = get_computer_name()
-        random_num = generate_random_num()
-        default_filename = f"ECUflash_{computer_name}_校验和计算_{random_num}.bin"
-        desktop_path = os.path.join(os.path.expanduser("~"), "Desktop")
-        default_path = os.path.join(desktop_path, default_filename)
-
-        save_path, _ = QFileDialog.getSaveFileName(
-            self,
-            "保存校验后文件",
-            default_path,
-            "BIN文件 (*.bin);;所有文件 (*.*)",
-        )
-        if not save_path:
-            self.status_label.setText("状态：校验和已计算，未保存文件")
-            return
-
-        with open(save_path, "wb") as file_obj:
-            file_obj.write(output_data)
-
-        self.modified_file_data = bytes(output_data)
-        self.status_label.setText(f"状态：文件保存成功 - {os.path.basename(save_path)}")
-
-        result_info = (
-            f"CPU型号：{cpu_display_name}\n"
-            f"校验地址：0x{checksum_offset:06X}\n"
-            f"原始文件CRC32：{binascii.crc32(self.original_file_data) & 0xFFFFFFFF:08X}\n"
-            f"新文件CRC32：{binascii.crc32(output_data) & 0xFFFFFFFF:08X}\n"
-            f"原始文件MD5：{hashlib.md5(self.original_file_data).hexdigest().upper()}\n"
-            f"新文件MD5：{hashlib.md5(output_data).hexdigest().upper()}"
-        )
-        show_message(self, QMessageBox.Information, "保存成功", "校验和计算并保存完成。")
-
-        parent = self.parent()
-        if parent and hasattr(parent, "add_operation_log"):
-            parent.add_operation_log(f"校验和工具：计算并保存文件 - {save_path}")
-            parent.add_operation_log(result_info.replace("\n", " | "))
-
-
-class MergedMainWindow(ECUFlashWindow):
-    def __init__(self, license_data):
-        self.license_data = license_data
-        self.allowed_function_ids = set(int(item) for item in license_data.get("permission_function_ids", []))
-        self.allowed_function_names = set(str(item).strip() for item in license_data.get("permission_function_names", []) if str(item).strip())
-        self.is_admin_user = bool(license_data.get("user", {}).get("is_admin"))
-        self.purchase_config = license_data.get("purchase_config") or {}
-        super().__init__()
-        self._patch_runtime_ui()
-
-    def show_purchase_dialog(self, func_name=""):
-        cfg = self.purchase_config or {}
-        title = cfg.get("title") or "功能开通"
-        message = cfg.get("message") or "当前功能尚未开通，请扫码付款后联系管理员授权。"
-        qr_code_url = cfg.get("qr_code_url") or ""
-        contact = cfg.get("contact") or ""
-
-        dialog = QDialog(self)
-        dialog.setWindowTitle(title)
-        apply_logo_to_window(dialog)
-        dialog.setFixedSize(560, 760)
-        dialog.setStyleSheet(
-            "QDialog{background:#0F172A;} QLabel{color:#E5E7EB;} QPushButton{background:#2563EB;color:white;border:none;border-radius:8px;padding:10px 18px;font-size:14px;font-weight:bold;}"
-        )
-        layout = QVBoxLayout(dialog)
-        layout.setContentsMargins(24, 24, 24, 24)
-        layout.setSpacing(16)
-
-        title_label = QLabel(title)
-        title_label.setStyleSheet("font-size:22px;font-weight:bold;color:#93C5FD;")
-        layout.addWidget(title_label)
-
-        if func_name:
-            func_label = QLabel(f"当前功能：{func_name}")
-            func_label.setStyleSheet("font-size:15px;color:#FBBF24;")
-            layout.addWidget(func_label)
-
-        message_label = QLabel(message)
-        message_label.setWordWrap(True)
-        message_label.setStyleSheet("font-size:18px;line-height:1.7;color:#E5E7EB;font-weight:bold;")
-        layout.addWidget(message_label)
-
-        if qr_code_url:
-            qr_label = QLabel()
-            qr_label.setAlignment(Qt.AlignCenter)
-            qr_label.setMinimumSize(420, 420)
-            qr_label.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
-            resolved_qr_code_url = _resolve_resource_url(qr_code_url)
-            try:
-                request = urllib.request.Request(resolved_qr_code_url, headers={"Accept": "image/*"})
-                with urllib.request.urlopen(request, timeout=8) as response:
-                    data = response.read()
-                pixmap = QPixmap()
-                if pixmap.loadFromData(data):
-                    qr_label.setPixmap(pixmap.scaled(420, 420, Qt.KeepAspectRatio, Qt.SmoothTransformation))
-                else:
-                    qr_label.setText(f"收款码：{resolved_qr_code_url}")
-            except Exception:
-                qr_label.setText(f"收款码：{resolved_qr_code_url}")
-            qr_label.setStyleSheet("background:#FFFFFF;border-radius:16px;padding:20px;color:#111827;")
-            layout.addWidget(qr_label, 0, Qt.AlignCenter)
-
-        layout.addStretch()
-        close_btn = QPushButton("我知道了")
-        close_btn.clicked.connect(dialog.accept)
-        layout.addWidget(close_btn)
-        dialog.exec_()
 
     def refresh_user_permissions(self, silent=False):
         token = self.license_data.get("token")
@@ -3332,7 +2548,6 @@ class MergedMainWindow(ECUFlashWindow):
         keyword = self.search_ecu_edit.text().strip().lower()
         if not keyword:
             return
-
         found_car = None
         found_ecu = None
         for car_type, ecu_list in ECU_DATABASE.items():
@@ -3343,11 +2558,9 @@ class MergedMainWindow(ECUFlashWindow):
                     break
             if found_car:
                 break
-
         if not found_car or not found_ecu:
             show_message(self, QMessageBox.Warning, "提示", "未找到匹配的 ECU 型号。")
             return
-
         self.car_combobox.setCurrentText(found_car)
         self.update_ecu_combobox(found_car)
         self.ecu_combobox.setCurrentText(found_ecu)
@@ -3374,98 +2587,116 @@ class MergedMainWindow(ECUFlashWindow):
         if hasattr(self, "search_ecu_edit"):
             self.search_ecu_edit.clear()
             self.search_ecu_edit.setPlaceholderText("输入 ECU 型号后回车，例如 ME7.8.8")
-
-        for button in self.findChildren(QPushButton):
-            if button.text() in {"操作日志", "更新说明"}:
-                button.clicked.connect(self.show_log_dialog)
-                break
         if hasattr(self, "logout_btn"):
             self.logout_btn.clicked.connect(self.logout_and_relogin)
-
-        auth_text = (
-            f"✓ 登录用户: {self.license_data['name']} | "
-            f"会话到期: {self.license_data['expire_time']}"
-        )
-        for label in self.findChildren(QLabel):
-            if "登录用户" in label.text() or "授权用户" in label.text():
-                label.setText(auth_text)
-                break
-
-        self.add_operation_log("系统启动成功")
-        self.add_operation_log(f"登录用户：{self.license_data['name']}")
-        if self.is_admin_user:
-            self.add_operation_log("权限状态：管理员，已开放全部功能")
-        else:
-            self.add_operation_log(f"权限状态：已授权功能 {len(self.allowed_function_names)} 项")
-        if str((self.purchase_config or {}).get("force_update", "0")) == "1":
-            self.add_operation_log("更新状态：当前版本被标记为强制更新")
-            show_message(self, QMessageBox.Warning, "强制更新", (self.purchase_config or {}).get("update_notice") or "当前版本需要强制更新，请联系管理员获取最新版。")
-        elif self._should_show_update_notice_once():
-            latest_version = str((self.purchase_config or {}).get("latest_version") or "").strip()
-            self.add_operation_log(f"更新状态：发现新版本公告 {latest_version}，首次提醒")
+        if self._should_show_update_notice_once():
             self.show_log_dialog(auto_open=True)
+        self.refresh_user_permissions(silent=True)
 
-    def open_checksum_dialog(self):
-        dialog = MergedChecksumDialog(self)
+    def show_purchase_dialog(self, func_name=""):
+        cfg = self.purchase_config or {}
+        title = cfg.get("title") or "功能开通"
+        message = cfg.get("message") or "当前功能尚未开通，请扫码付款后联系管理员授权。"
+        qr_code_url = cfg.get("qr_code_url") or ""
+        contact = cfg.get("contact") or ""
+        dialog = QDialog(self)
+        dialog.setWindowTitle(title)
+        apply_logo_to_window(dialog)
+        dialog.setFixedSize(560, 760)
+        dialog.setStyleSheet("QDialog{background:#0F172A;} QLabel{color:#E5E7EB;} QPushButton{background:#2563EB;color:white;border:none;border-radius:8px;padding:10px 18px;font-size:14px;font-weight:bold;}")
+        layout = QVBoxLayout(dialog)
+        layout.setContentsMargins(24, 24, 24, 24)
+        layout.setSpacing(16)
+
+        title_label = QLabel(title)
+        title_label.setStyleSheet("font-size:22px;font-weight:bold;color:#93C5FD;")
+        layout.addWidget(title_label)
+
+        if func_name:
+            func_label = QLabel(f"当前功能：{func_name}")
+            func_label.setStyleSheet("font-size:15px;color:#FBBF24;")
+            layout.addWidget(func_label)
+
+        message_label = QLabel(message)
+        message_label.setWordWrap(True)
+        message_label.setStyleSheet("font-size:18px;line-height:1.7;color:#E5E7EB;font-weight:bold;")
+        layout.addWidget(message_label)
+
+        if qr_code_url:
+            qr_label = QLabel()
+            qr_label.setAlignment(Qt.AlignCenter)
+            qr_label.setMinimumSize(420, 420)
+            qr_label.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
+            resolved_qr_code_url = _resolve_resource_url(qr_code_url)
+            try:
+                request = urllib.request.Request(resolved_qr_code_url, headers={"Accept": "image/*"})
+                with urllib.request.urlopen(request, timeout=8) as response:
+                    data = response.read()
+                pixmap = QPixmap()
+                if pixmap.loadFromData(data):
+                    qr_label.setPixmap(pixmap.scaled(420, 420, Qt.KeepAspectRatio, Qt.SmoothTransformation))
+                else:
+                    qr_label.setText(f"收款码：{resolved_qr_code_url}")
+            except Exception:
+                qr_label.setText(f"收款码：{resolved_qr_code_url}")
+            qr_label.setStyleSheet("background:#FFFFFF;border-radius:16px;padding:20px;color:#111827;")
+            layout.addWidget(qr_label, 0, Qt.AlignCenter)
+
+        if contact:
+            contact_label = QLabel(f"联系方式：{contact}")
+            contact_label.setStyleSheet("font-size:14px;color:#CBD5E1;")
+            layout.addWidget(contact_label)
+
+        layout.addStretch()
+        close_btn = QPushButton("我知道了")
+        close_btn.clicked.connect(dialog.accept)
+        layout.addWidget(close_btn)
         dialog.exec_()
 
     def logout_and_relogin(self):
-        # 自定义退出对话框，支持解除设备绑定
         dialog = QDialog(self)
         dialog.setWindowTitle("退出登录")
         apply_logo_to_window(dialog)
         dialog.setFixedSize(420, 280)
-        dialog.setStyleSheet("""
-            QDialog { background-color: #111827; font-family: Microsoft YaHei; }
-            QLabel { color: #E5E7EB; font-size: 14px; }
-            QCheckBox { color: #D1D5DB; font-size: 13px; spacing: 6px; }
-            QCheckBox::indicator { width: 16px; height: 16px; border-radius: 3px;
-                border: 1px solid #4B5563; background: #1F2937; }
-            QCheckBox::indicator:checked { background: #3B82F6; border-color: #3B82F6; }
-            QPushButton { min-height: 40px; border-radius: 8px; font-size: 14px; font-weight: bold; padding: 8px 20px; }
-        """)
-
+        dialog.setStyleSheet(
+            "QDialog { background-color: #111827; font-family: Microsoft YaHei; }"
+            "QLabel { color: #E5E7EB; font-size: 14px; }"
+            "QCheckBox { color: #D1D5DB; font-size: 13px; spacing: 6px; }"
+            "QCheckBox::indicator { width: 16px; height: 16px; border-radius: 3px;border: 1px solid #4B5563; background: #1F2937; }"
+            "QCheckBox::indicator:checked { background: #3B82F6; border-color: #3B82F6; }"
+            "QPushButton { min-height: 40px; border-radius: 8px; font-size: 14px; font-weight: bold; padding: 8px 20px; }"
+        )
         layout = QVBoxLayout(dialog)
         layout.setContentsMargins(30, 24, 30, 24)
         layout.setSpacing(16)
-
         title_label = QLabel("确定要退出当前账号吗？")
         title_label.setFont(QFont("Microsoft YaHei", 16, QFont.Bold))
         title_label.setStyleSheet("color: #F3F4F6;")
         title_label.setAlignment(Qt.AlignCenter)
         layout.addWidget(title_label)
-
         device_info = self.license_data.get("user", {}).get("device_name") or "当前设备"
         hint_label = QLabel(f"当前绑定设备：{device_info}")
         hint_label.setStyleSheet("color: #9CA3AF; font-size: 12px;")
         hint_label.setAlignment(Qt.AlignCenter)
         layout.addWidget(hint_label)
-
         unbind_checkbox = QCheckBox("同时解除设备绑定（换电脑时需要）")
         unbind_checkbox.setStyleSheet("color: #FBBF24; font-size: 13px; font-weight: bold;")
         layout.addWidget(unbind_checkbox)
-
         btn_layout = QHBoxLayout()
         btn_layout.setSpacing(12)
-
         cancel_btn = QPushButton("取消")
         cancel_btn.setStyleSheet("background-color: #374151; color: #D1D5DB;")
         cancel_btn.clicked.connect(dialog.reject)
-
         confirm_btn = QPushButton("确认退出")
         confirm_btn.setStyleSheet("background-color: #EF4444; color: white;")
         confirm_btn.clicked.connect(dialog.accept)
-
         btn_layout.addWidget(cancel_btn)
         btn_layout.addWidget(confirm_btn)
         layout.addLayout(btn_layout)
-
         if dialog.exec_() != QDialog.Accepted:
             return
-
         should_unbind = unbind_checkbox.isChecked()
         token = self.license_data.get("token")
-
         if should_unbind and token:
             try:
                 result = _api_request_json("/auth/unbind-device", method="POST", token=token)
@@ -3473,27 +2704,22 @@ class MergedMainWindow(ECUFlashWindow):
                 self.add_operation_log(f"已解除设备绑定：{unbound}...")
             except Exception as exc:
                 self.add_operation_log(f"解除设备绑定失败：{exc}")
-
         if token:
             try:
                 _api_request_json("/auth/logout", method="POST", token=token)
             except Exception as exc:
                 self.add_operation_log(f"服务端退出登录失败：{exc}")
-
         clear_session_data()
         self.add_operation_log("当前账号已退出登录")
-
         dialog = RegisterDialog()
         if dialog.exec_() != QDialog.Accepted:
             self.close()
             return
-
         new_session = dialog.session_data or check_license()
         if not new_session:
             show_message(self, QMessageBox.Critical, "错误", "重新登录后未能读取会话信息。")
             self.close()
             return
-
         replacement = MergedMainWindow(new_session)
         replacement.showMaximized()
         self.close()
@@ -3506,48 +2732,39 @@ class MergedMainWindow(ECUFlashWindow):
         dialog = QDialog(self)
         dialog.setWindowTitle("更新说明")
         apply_logo_to_window(dialog)
-        dialog.resize(860, 620)
+        dialog.resize(960, 760)
         dialog.setStyleSheet(
             "QDialog{background:#111827;} QLabel{color:#E5E7EB;} "
-            "QTextEdit{background:#0F172A; color:#E5E7EB; border:1px solid #1D4ED8; "
-            "border-radius:6px; font-size:14px; padding:8px;} "
-            "QPushButton{background:#2563EB; color:white; border:none; border-radius:6px; "
-            "padding:10px 20px; font-size:14px; font-weight:bold;}"
+            "QTextEdit{background:#0F172A; color:#E5E7EB; border:1px solid #1D4ED8; border-radius:6px; font-size:16px; padding:12px;} "
+            "QPushButton{background:#2563EB; color:white; border:none; border-radius:6px; padding:10px 20px; font-size:14px; font-weight:bold;}"
         )
-
         layout = QVBoxLayout(dialog)
         title = QLabel("更新说明")
-        title.setStyleSheet("color:#93C5FD; font-size:18px; font-weight:bold;")
+        title.setStyleSheet("color:#93C5FD; font-size:22px; font-weight:bold;")
         layout.addWidget(title)
-
         if latest_version:
             version_label = QLabel(f"当前客户端：{APP_VERSION}    最新版本：{latest_version}")
-            version_label.setStyleSheet("font-size:13px;color:#93C5FD;")
+            version_label.setStyleSheet("font-size:14px;color:#93C5FD;")
             layout.addWidget(version_label)
-
         if cfg.get("force_update") == "1":
             force_label = QLabel("当前版本要求强制更新，请按公告指引处理。")
-            force_label.setStyleSheet("font-size:14px;font-weight:bold;color:#FCA5A5;")
+            force_label.setStyleSheet("font-size:16px;font-weight:bold;color:#FCA5A5;")
             layout.addWidget(force_label)
-
         notice_view = QTextEdit(dialog)
         notice_view.setReadOnly(True)
         notice_view.setPlainText(notice_text or "暂无更新说明")
         layout.addWidget(notice_view, 3)
-
         log_title = QLabel("本地操作日志")
-        log_title.setStyleSheet("color:#FBBF24; font-size:16px; font-weight:bold;")
+        log_title.setStyleSheet("color:#FBBF24; font-size:18px; font-weight:bold;")
         layout.addWidget(log_title)
-
         log_view = QTextEdit(dialog)
         log_view.setReadOnly(True)
         log_view.setPlainText(self.operation_log_area.toPlainText() or "暂无操作日志")
         layout.addWidget(log_view, 2)
-
         button_row = QHBoxLayout()
         button_row.addStretch()
         if latest_download_url:
-            download_button = QPushButton("立即更新")
+            download_button = QPushButton("下载最新版")
             download_button.clicked.connect(lambda: _open_url(latest_download_url))
             button_row.addWidget(download_button)
         close_button = QPushButton("关闭")
@@ -3559,18 +2776,40 @@ class MergedMainWindow(ECUFlashWindow):
         dialog.exec_()
 
 
+class MergedMainWindow(ECUFlashWindow):
+    pass
+
+
+def _encode_idle_value_hex(idle_rpm):
+    base = int(idle_rpm)
+    low = base & 0xFF
+    high = (base >> 8) & 0xFF
+    single = f"{low:02X}"
+    pair = f"{low:02X}{high:02X}"
+    block12 = pair * 12
+    return {1: single, 2: pair, 24: block12}
+
+
+def show_message(parent, icon, title, text, info_text=""):
+    message_box = create_branded_message_box(parent)
+    message_box.setIcon(icon)
+    message_box.setWindowTitle(title)
+    message_box.setText(text)
+    if info_text:
+        message_box.setInformativeText(info_text)
+    message_box.exec_()
+
+
 def main():
     configure_qt_runtime()
     app = QApplication.instance()
     if app is None:
         app = QApplication(sys.argv)
-
     init_ui_scaling(app)
     app.setFont(QFont("Microsoft YaHei", scaled_point(10)))
     app.setStyle(QStyleFactory.create("Fusion"))
 
     license_data = check_license()
-
     if not license_data:
         dialog = RegisterDialog()
         if dialog.exec_() != QDialog.Accepted:
@@ -3583,8 +2822,24 @@ def main():
     try:
         load_remote_runtime_dataset(license_data["token"])
     except Exception as exc:
-        show_message(None, QMessageBox.Critical, "接口错误", f"无法加载服务端数据：{exc}", f"接口地址：{API_BASE_URL}")
-        return 1
+        exc_text = str(exc)
+        if "401" in exc_text or "Unauthorized" in exc_text:
+            clear_session_data()
+            relogin = RegisterDialog()
+            if relogin.exec_() != QDialog.Accepted:
+                return 0
+            license_data = relogin.session_data or check_license()
+            if not license_data:
+                show_message(None, QMessageBox.Critical, "错误", "重新登录后未能读取会话信息。")
+                return 1
+            try:
+                load_remote_runtime_dataset(license_data["token"])
+            except Exception as relogin_exc:
+                show_message(None, QMessageBox.Critical, "接口错误", f"重新登录后仍无法加载服务端数据：{relogin_exc}", f"接口地址：{API_BASE_URL}")
+                return 1
+        else:
+            show_message(None, QMessageBox.Critical, "接口错误", f"无法加载服务端数据：{exc}", f"接口地址：{API_BASE_URL}")
+            return 1
 
     window = MergedMainWindow(license_data)
     window.showMaximized()
@@ -3593,6 +2848,3 @@ def main():
 
 if __name__ == "__main__":
     sys.exit(main())
-
-
-
