@@ -56,6 +56,7 @@ def get_current_user(authorization: Optional[str] = Header(default=None)) -> dic
             u.name,
             u.status,
             u.is_admin,
+            u.auth_end_at,
             u.device_id,
             u.device_name,
             u.device_bound_at,

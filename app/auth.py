@@ -43,6 +43,8 @@ class UserOut(BaseModel):
     name: str
     status: str
     is_admin: bool
+    auth_end_at: Optional[str] = None
+    auth_status: Optional[str] = None
     device_id: Optional[str] = None
     device_name: Optional[str] = None
     device_bound_at: Optional[str] = None
@@ -152,6 +154,8 @@ def register(payload: RegisterIn) -> AuthOut:
             name=payload.name.strip(),
             status="enabled",
             is_admin=False,
+            auth_end_at=None,
+            auth_status="unauthorized",
             device_id=payload.device_id.strip(),
             device_name=payload.device_name.strip(),
             device_bound_at=now,
@@ -171,6 +175,7 @@ def login(payload: LoginIn) -> AuthOut:
             text(
                 """
                 SELECT id, phone, name, password_hash, status, is_admin,
+                       auth_end_at,
                        device_id, device_name, device_bound_at,
                        created_at, updated_at, last_login_at
                 FROM app_user
@@ -186,6 +191,8 @@ def login(payload: LoginIn) -> AuthOut:
             raise HTTPException(status_code=403, detail="user pending approval")
         if user["status"] != "enabled":
             raise HTTPException(status_code=403, detail="user disabled")
+        if not user.get("is_admin") and user.get("auth_end_at") and str(user.get("auth_end_at")) <= now_str():
+            raise HTTPException(status_code=403, detail="user authorization expired")
 
         bound_device_id = (user.get("device_id") or "").strip()
         if bound_device_id and bound_device_id != payload.device_id.strip():
@@ -263,6 +270,8 @@ def login(payload: LoginIn) -> AuthOut:
             name=user["name"],
             status=user["status"],
             is_admin=bool(user["is_admin"]),
+            auth_end_at=str(user["auth_end_at"]) if user.get("auth_end_at") else None,
+            auth_status=("authorized" if bool(user["is_admin"]) or (user.get("auth_end_at") and str(user.get("auth_end_at")) > now) else "unauthorized"),
             device_id=payload.device_id.strip(),
             device_name=payload.device_name.strip(),
             device_bound_at=str(user["device_bound_at"]) if user.get("device_bound_at") else now,
@@ -335,17 +344,21 @@ def unbind_device(user: dict = Depends(get_current_user)) -> dict:
 
 @router.get("/me", response_model=UserOut)
 def me(user: dict = Depends(get_current_user)) -> UserOut:
+    auth_end_at = str(user["auth_end_at"]) if user.get("auth_end_at") else None
+    auth_status = "authorized" if bool(user.get("is_admin")) or (auth_end_at and auth_end_at > now_str()) else "unauthorized"
     return UserOut(
         id=user["id"],
         phone=user["phone"],
         name=user["name"],
         status=user["status"],
         is_admin=bool(user["is_admin"]),
+        auth_end_at=auth_end_at,
+        auth_status=auth_status,
         device_id=user.get("device_id"),
         device_name=user.get("device_name"),
         device_bound_at=str(user["device_bound_at"]) if user.get("device_bound_at") else None,
         created_at=str(user["created_at"]) if user["created_at"] else None,
-        updated_at=str(user["updated_at"]) if user["updated_at"] else None,
+        updated_at=str(user["updated_at"]) if user.get("updated_at") else None,
         last_login_at=str(user["last_login_at"]) if user["last_login_at"] else None,
     )
 
@@ -381,9 +394,13 @@ def my_permissions(user: dict = Depends(get_current_user)) -> dict:
         if name and name not in seen:
             seen.add(name)
             function_names.append(name)
+    auth_end_at = str(user["auth_end_at"]) if user.get("auth_end_at") else None
+    auth_status = "authorized" if bool(user.get("is_admin")) or (auth_end_at and auth_end_at > now_str()) else "unauthorized"
     return {
         "user_id": user["id"],
         "is_admin": bool(user["is_admin"]),
+        "auth_end_at": auth_end_at,
+        "auth_status": auth_status,
         "items": items,
         "function_ids": [item["function_id"] for item in items],
         "function_names": function_names,

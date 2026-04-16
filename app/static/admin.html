@@ -197,11 +197,6 @@
         const dashboard = reactive({ summary: {}, recent_users: [], recent_logs: [] });
         const users = ref([]);
         const logs = ref([]);
-        const permissionTree = ref([]);
-        const permissionSearch = ref('');
-        const selectedUser = ref(null);
-        const selectedFunctionIds = ref([]);
-        const permissionEndAt = ref('');
         const loginForm = reactive({ phone: 'admin', password: 'admin1234' });
         const createForm = reactive({ phone: '', name: '', password: '', status: 'enabled' });
         const resetPasswordForm = reactive({ password: '' });
@@ -215,6 +210,21 @@
         const wiringGuideVisible = ref(false);
         const wiringGuideSubmitting = ref(false);
         const wiringGuideForm = reactive({ id: null, name: '', model: '', car_model: '', keywords: '', description: '', preview_image_url: '', file_name: '', object_key: '', file_url: '', content_type: '', file_size: 0, sort_order: 0, is_enabled: 1 });
+        const ecuRules = ref([]);
+        const ecuRuleSearch = ref('');
+        const selectedEcuRule = ref(null);
+        const ecuRuleDetail = ref(null);
+        const identifyRuleVisible = ref(false);
+        const ecuFunctionVisible = ref(false);
+        const ecuVariantVisible = ref(false);
+        const ecuPatchVisible = ref(false);
+        const editingIdentifyRuleId = ref(null);
+        const editingFunctionId = ref(null);
+        const editingPatchId = ref(null);
+        const identifyRuleForm = reactive({ ecu_model_id: null, addr: '', data_length: '', hex_value: '' });
+        const ecuFunctionForm = reactive({ ecu_model_id: null, name: '', success_msg: '', sort_order: 0, is_enabled: 1 });
+        const ecuVariantForm = reactive({ function_id: null, identify_hex: '' });
+        const ecuPatchForm = reactive({ variant_id: null, seq_no: 1, addr: '', data_length: '', value_hex: '' });
         const learningArticles = ref([]);
         const learningArticleVisible = ref(false);
         const learningArticleSubmitting = ref(false);
@@ -223,14 +233,17 @@
         const createVisible = ref(false);
         const resetPasswordVisible = ref(false);
         const resetPasswordUser = ref(null);
+        const authUserVisible = ref(false);
+        const authUser = ref(null);
+        const authForm = reactive({ auth_days: 365 });
 
         const headers = computed(() => token.value ? { Authorization: 'Bearer ' + token.value } : {});
 
         const navItems = [
           { key: 'dashboard', label: '仪表盘' },
           { key: 'users', label: '用户管理' },
-          { key: 'permissions', label: '权限授权' },
           { key: 'purchase', label: '开通配置' },
+          { key: 'ecu-rules', label: 'ECU规则管理' },
           { key: 'wiring-guides', label: '接线图管理' },
           { key: 'learning-articles', label: '学习资料' },
           { key: 'logs', label: '操作日志' },
@@ -296,17 +309,6 @@
         async function loadUsers() {
           const data = await request('/api/v1/admin/users');
           users.value = data.items;
-          if (!selectedUser.value && users.value.length) {
-            selectedUser.value = users.value[0];
-          } else if (selectedUser.value) {
-            const next = users.value.find(item => item.id === selectedUser.value.id);
-            if (next) selectedUser.value = next;
-          }
-        }
-
-        async function loadPermissionTree() {
-          const data = await request('/api/v1/admin/permission-tree');
-          permissionTree.value = data.items;
         }
 
         async function loadLogs() {
@@ -343,29 +345,184 @@
           learningArticles.value = data.items || [];
         }
 
-        async function loadUserPermissions() {
-          if (!selectedUser.value) return;
-          const data = await request(`/api/v1/admin/users/${selectedUser.value.id}/permissions`);
-          const treeMap = new Map(permissionTree.value.map(item => [item.label, item.id]));
-          const uniqueIds = [];
-          const seen = new Set();
-          for (const item of data.items.filter(item => item.status === 'enabled')) {
-            const func = permissionTree.value.find(row => row.id === item.function_id || row.label === item.function_name);
-            const resolvedId = func ? func.id : item.function_id;
-            if (!seen.has(resolvedId)) {
-              seen.add(resolvedId);
-              uniqueIds.push(resolvedId);
-            }
+        async function loadEcuRules() {
+          const data = await request('/api/v1/admin/ecu-rules');
+          ecuRules.value = data.items || [];
+          if (!selectedEcuRule.value && ecuRules.value.length) {
+            selectedEcuRule.value = ecuRules.value[0];
+            await loadEcuRuleDetail(selectedEcuRule.value.id);
           }
-          selectedFunctionIds.value = uniqueIds;
-          const firstWithEnd = data.items.find(item => item.end_at);
-          permissionEndAt.value = firstWithEnd && firstWithEnd.end_at ? String(firstWithEnd.end_at).replace('T', ' ').slice(0, 19) : '';
+        }
+
+        async function loadEcuRuleDetail(ecuModelId) {
+          if (!ecuModelId) return;
+          const data = await request(`/api/v1/admin/ecu-rules/${ecuModelId}`);
+          ecuRuleDetail.value = data;
+          identifyRuleForm.ecu_model_id = ecuModelId;
+          ecuFunctionForm.ecu_model_id = ecuModelId;
+        }
+
+        function openIdentifyRuleModal(rule = null) {
+          if (!selectedEcuRule.value) {
+            Message.warning('请先从左侧选择一个 ECU 型号');
+            return;
+          }
+          editingIdentifyRuleId.value = rule ? rule.id : null;
+          identifyRuleForm.ecu_model_id = selectedEcuRule.value.id;
+          identifyRuleForm.addr = rule ? rule.addr : '';
+          identifyRuleForm.data_length = rule ? rule.data_length : '';
+          identifyRuleForm.hex_value = rule ? rule.hex_value : '';
+          identifyRuleVisible.value = true;
+        }
+
+        function parseNumericInput(value) {
+          const text = String(value || '').trim();
+          if (!text) return 0;
+          return text.toLowerCase().startsWith('0x') ? parseInt(text, 16) : Number(text);
+        }
+
+        function normalizeHexText(value) {
+          return String(value || '').replace(/\s+/g, '').toUpperCase();
+        }
+
+        async function createIdentifyRule() {
+          const path = editingIdentifyRuleId.value ? `/api/v1/admin/ecu-rules/identify-rule/${editingIdentifyRuleId.value}` : '/api/v1/admin/ecu-rules/identify-rule';
+          const method = editingIdentifyRuleId.value ? 'PUT' : 'POST';
+          await request(path, {
+            method,
+            body: JSON.stringify({
+              ecu_model_id: Number(identifyRuleForm.ecu_model_id),
+              addr: parseNumericInput(identifyRuleForm.addr),
+              data_length: Number(identifyRuleForm.data_length),
+              hex_value: normalizeHexText(identifyRuleForm.hex_value),
+            }),
+          });
+          Message.success(editingIdentifyRuleId.value ? '识别规则已更新' : '识别规则已新增');
+          identifyRuleVisible.value = false;
+          editingIdentifyRuleId.value = null;
+          identifyRuleForm.addr = '';
+          identifyRuleForm.data_length = '';
+          identifyRuleForm.hex_value = '';
+          await Promise.all([loadEcuRules(), loadEcuRuleDetail(identifyRuleForm.ecu_model_id), loadLogs()]);
+        }
+
+        function openFunctionModal(func = null) {
+          if (!selectedEcuRule.value) {
+            Message.warning('请先从左侧选择一个 ECU 型号');
+            return;
+          }
+          editingFunctionId.value = func ? func.id : null;
+          ecuFunctionForm.ecu_model_id = selectedEcuRule.value.id;
+          ecuFunctionForm.name = func ? func.name : '';
+          ecuFunctionForm.success_msg = func ? (func.success_msg || '') : '';
+          ecuFunctionForm.sort_order = func ? (func.sort_order || 0) : 0;
+          ecuFunctionForm.is_enabled = func ? (func.is_enabled ? 1 : 0) : 1;
+          ecuFunctionVisible.value = true;
+        }
+
+        async function createEcuFunction() {
+          const path = editingFunctionId.value ? `/api/v1/admin/ecu-rules/function/${editingFunctionId.value}` : '/api/v1/admin/ecu-rules/function';
+          const method = editingFunctionId.value ? 'PUT' : 'POST';
+          await request(path, {
+            method,
+            body: JSON.stringify({
+              ecu_model_id: Number(ecuFunctionForm.ecu_model_id),
+              name: ecuFunctionForm.name,
+              success_msg: ecuFunctionForm.success_msg,
+              sort_order: Number(ecuFunctionForm.sort_order || 0),
+              is_enabled: Number(ecuFunctionForm.is_enabled || 1),
+            }),
+          });
+          Message.success(editingFunctionId.value ? '功能已更新' : '功能已新增');
+          ecuFunctionVisible.value = false;
+          editingFunctionId.value = null;
+          ecuFunctionForm.name = '';
+          ecuFunctionForm.success_msg = '';
+          ecuFunctionForm.sort_order = 0;
+          await Promise.all([loadEcuRules(), loadEcuRuleDetail(ecuFunctionForm.ecu_model_id), loadLogs()]);
+        }
+
+        function prepareVariantForm(func) {
+          ecuVariantForm.function_id = func.id;
+          ecuVariantForm.identify_hex = '';
+          ecuVariantVisible.value = true;
+          Message.info(`已选中功能：${func.name}`);
+        }
+
+        function preparePatchForm(variant, patch = null) {
+          editingPatchId.value = patch ? patch.id : null;
+          ecuPatchForm.variant_id = variant.id;
+          ecuPatchForm.seq_no = patch ? patch.seq_no : (((variant.patches || []).length || 0) + 1);
+          ecuPatchForm.addr = patch ? patch.addr : '';
+          ecuPatchForm.data_length = patch ? patch.data_length : '';
+          ecuPatchForm.value_hex = patch ? patch.value_hex : '';
+          ecuPatchVisible.value = true;
+          Message.info(patch ? '已选中补丁，可直接编辑' : '已选中功能变体，可直接新增补丁');
+        }
+
+        async function createVariant() {
+          await request('/api/v1/admin/ecu-rules/variant', {
+            method: 'POST',
+            body: JSON.stringify({
+              function_id: Number(ecuVariantForm.function_id),
+              identify_hex: normalizeHexText(ecuVariantForm.identify_hex),
+            }),
+          });
+          Message.success('功能变体已新增');
+          const currentId = selectedEcuRule.value && selectedEcuRule.value.id;
+          ecuVariantVisible.value = false;
+          ecuVariantForm.identify_hex = '';
+          if (currentId) await Promise.all([loadEcuRuleDetail(currentId), loadLogs()]);
+        }
+
+        async function createPatch() {
+          const path = editingPatchId.value ? `/api/v1/admin/ecu-rules/patch/${editingPatchId.value}` : '/api/v1/admin/ecu-rules/patch';
+          const method = editingPatchId.value ? 'PUT' : 'POST';
+          await request(path, {
+            method,
+            body: JSON.stringify({
+              variant_id: Number(ecuPatchForm.variant_id),
+              seq_no: Number(ecuPatchForm.seq_no || 0),
+              addr: parseNumericInput(ecuPatchForm.addr),
+              data_length: Number(ecuPatchForm.data_length),
+              value_hex: normalizeHexText(ecuPatchForm.value_hex),
+            }),
+          });
+          Message.success(editingPatchId.value ? '补丁已更新' : '补丁已新增');
+          const currentId = selectedEcuRule.value && selectedEcuRule.value.id;
+          ecuPatchVisible.value = false;
+          editingPatchId.value = null;
+          ecuPatchForm.seq_no = 1;
+          ecuPatchForm.addr = '';
+          ecuPatchForm.data_length = '';
+          ecuPatchForm.value_hex = '';
+          if (currentId) await Promise.all([loadEcuRuleDetail(currentId), loadLogs()]);
+        }
+
+        async function deleteIdentifyRule(rule) {
+          await request(`/api/v1/admin/ecu-rules/identify-rule/${rule.id}`, { method: 'DELETE' });
+          Message.success('识别规则已删除');
+          const currentId = selectedEcuRule.value && selectedEcuRule.value.id;
+          if (currentId) await Promise.all([loadEcuRules(), loadEcuRuleDetail(currentId), loadLogs()]);
+        }
+
+        async function deleteVariant(variant) {
+          await request(`/api/v1/admin/ecu-rules/variant/${variant.id}`, { method: 'DELETE' });
+          Message.success('功能变体已删除');
+          const currentId = selectedEcuRule.value && selectedEcuRule.value.id;
+          if (currentId) await Promise.all([loadEcuRules(), loadEcuRuleDetail(currentId), loadLogs()]);
+        }
+
+        async function deletePatch(patch) {
+          await request(`/api/v1/admin/ecu-rules/patch/${patch.id}`, { method: 'DELETE' });
+          Message.success('补丁已删除');
+          const currentId = selectedEcuRule.value && selectedEcuRule.value.id;
+          if (currentId) await Promise.all([loadEcuRuleDetail(currentId), loadLogs()]);
         }
 
         async function loadAll() {
           await loadMe();
-          await Promise.all([loadDashboard(), loadUsers(), loadPermissionTree(), loadLogs(), loadPurchaseConfig(), loadWiringGuides(), loadLearningArticles()]);
-          await loadUserPermissions();
+          await Promise.all([loadDashboard(), loadUsers(), loadLogs(), loadPurchaseConfig(), loadWiringGuides(), loadLearningArticles(), loadEcuRules()]);
         }
 
         async function createUser() {
@@ -441,21 +598,23 @@
           }
         }
 
-        async function savePermissions() {
-          if (!selectedUser.value) return;
+        function openAuthUser(user) {
+          authUser.value = user;
+          authForm.auth_days = 365;
+          authUserVisible.value = true;
+        }
+
+        async function saveUserAuth() {
+          if (!authUser.value) return;
           try {
-            await request('/api/v1/admin/permissions', {
+            await request(`/api/v1/admin/users/${authUser.value.id}/auth`, {
               method: 'POST',
-              body: JSON.stringify({
-                user_id: selectedUser.value.id,
-                function_ids: selectedFunctionIds.value,
-                end_at: permissionEndAt.value || null,
-              }),
+              body: JSON.stringify({ auth_days: Number(authForm.auth_days || 365) }),
             });
-            Message.success('权限已保存');
-            await loadUsers();
-            await loadDashboard();
-            await loadLogs();
+            Message.success('授权时间已保存');
+            authUserVisible.value = false;
+            authUser.value = null;
+            await Promise.all([loadUsers(), loadDashboard(), loadLogs()]);
           } catch (err) {
             Message.error(err.message);
           }
@@ -887,9 +1046,13 @@
           return status || '-';
         }
 
-        const filteredTree = computed(() => {
-          const lower = permissionSearch.value.trim().toLowerCase();
-          return permissionTree.value.filter(item => !lower || item.label.toLowerCase().includes(lower));
+        const filteredEcuRules = computed(() => {
+          const keyword = ecuRuleSearch.value.trim().toLowerCase();
+          if (!keyword) return ecuRules.value;
+          return ecuRules.value.filter(item => {
+            const text = `${item.name || ''} ${item.car_series_name || ''}`.toLowerCase();
+            return text.includes(keyword);
+          });
         });
 
         onMounted(async () => {
@@ -918,16 +1081,14 @@
           resetPasswordForm,
           resetPasswordVisible,
           resetPasswordUser,
+          authUserVisible,
+          authUser,
+          authForm,
           purchaseForm,
           virtualAssets,
           assetVisible,
           assetSubmitting,
           assetForm,
-          selectedUser,
-          selectedFunctionIds,
-          permissionEndAt,
-          permissionSearch,
-          filteredTree,
           learningArticles,
           learningArticleVisible,
           learningArticleSubmitting,
@@ -940,6 +1101,8 @@
           rejectUser,
           unbindUserDevice,
           deleteUser,
+          openAuthUser,
+          saveUserAuth,
           openResetPassword,
           resetPassword,
           savePurchaseConfig,
@@ -953,13 +1116,39 @@
           uploadLearningArticleImage,
           insertLearningArticleParagraph,
           uploadQrCode,
-          savePermissions,
-          loadUserPermissions,
           wiringGuides,
           wiringGuideSearch,
           wiringGuideVisible,
           wiringGuideSubmitting,
           wiringGuideForm,
+          ecuRules,
+          ecuRuleSearch,
+          filteredEcuRules,
+          selectedEcuRule,
+          ecuRuleDetail,
+          identifyRuleVisible,
+          ecuFunctionVisible,
+          ecuVariantVisible,
+          ecuPatchVisible,
+          identifyRuleForm,
+          ecuFunctionForm,
+          ecuVariantForm,
+          ecuPatchForm,
+          loadEcuRules,
+          loadEcuRuleDetail,
+          openIdentifyRuleModal,
+          openFunctionModal,
+          createIdentifyRule,
+          createEcuFunction,
+          createVariant,
+          createPatch,
+          deleteIdentifyRule,
+          deleteVariant,
+          deletePatch,
+          prepareVariantForm,
+          preparePatchForm,
+          prepareVariantForm,
+          preparePatchForm,
           loadWiringGuides,
           openCreateWiringGuide,
           openEditWiringGuide,
@@ -1018,14 +1207,14 @@
                   <div class="muted">当前可登录账号数量</div>
                 </div>
                 <div class="panel">
-                  <div class="muted">有效授权数</div>
-                  <div class="stat-value">{{ dashboard.summary.total_permissions || 0 }}</div>
-                  <div class="muted">已配置功能权限条目</div>
+                  <div class="muted">待审批用户数</div>
+                  <div class="stat-value">{{ dashboard.summary.pending_users || 0 }}</div>
+                  <div class="muted">注册后等待管理员处理的账号</div>
                 </div>
                 <div class="panel">
-                  <div class="muted">7天内到期</div>
-                  <div class="stat-value">{{ dashboard.summary.expiring_soon || 0 }}</div>
-                  <div class="muted">建议优先处理续期用户</div>
+                  <div class="muted">已绑定设备数</div>
+                  <div class="stat-value">{{ dashboard.summary.bound_devices || 0 }}</div>
+                  <div class="muted">当前已绑定设备的账号数量</div>
                 </div>
               </div>
               <div class="content-grid two-col">
@@ -1063,7 +1252,7 @@
               <div class="panel" style="margin-bottom:16px;display:flex;justify-content:space-between;align-items:center;">
                 <div>
                   <div class="panel-title" style="margin-bottom:4px;">用户管理</div>
-                  <div class="muted">查看账号状态、授权数量与最近登录</div>
+                  <div class="muted">查看账号状态、设备绑定、授权状态与最近登录</div>
                 </div>
                 <a-button type="primary" @click="createVisible = true">新建用户</a-button>
               </div>
@@ -1083,19 +1272,25 @@
                         <a-tag :color="record.status === 'enabled' ? 'green' : (record.status === 'pending' ? 'orange' : 'red')">{{ statusLabel(record.status) }}</a-tag>
                       </template>
                     </a-table-column>
+                    <a-table-column title="授权状态" :width="180">
+                      <template #cell="{ record }">
+                        <div>
+                          <a-tag :color="record.auth_end_at ? 'green' : 'gray'">{{ record.auth_end_at ? '已授权' : '未授权' }}</a-tag>
+                        </div>
+                        <div class="muted">{{ record.auth_end_at || '-' }}</div>
+                      </template>
+                    </a-table-column>
                     <a-table-column title="管理员">
                       <template #cell="{ record }">{{ record.is_admin ? '是' : '否' }}</template>
                     </a-table-column>
-                    <a-table-column title="功能数" data-index="permission_count"></a-table-column>
-                    <a-table-column title="到期时间" data-index="permission_end_at"></a-table-column>
                     <a-table-column title="最近登录" data-index="last_login_at"></a-table-column>
                     <a-table-column title="审批备注" data-index="approval_note"></a-table-column>
                     <a-table-column title="操作" :width="360">
                       <template #cell="{ record }">
                         <a-space>
-                          <a-button size="mini" @click="activeMenu='permissions'; selectedUser=record; loadUserPermissions()">授权</a-button>
                           <a-button v-if="record.status === 'pending'" size="mini" status="success" @click="approveUser(record)">审批通过</a-button>
                           <a-button v-if="record.status === 'pending'" size="mini" status="danger" @click="rejectUser(record)">驳回</a-button>
+                          <a-button size="mini" type="primary" @click="openAuthUser(record)">授权</a-button>
                           <a-button size="mini" status="warning" @click="unbindUserDevice(record)">解绑设备</a-button>
                           <a-button size="mini" @click="openResetPassword(record)">重置密码</a-button>
                           <a-button size="mini" status="warning" @click="toggleUser(record)">切换状态</a-button>
@@ -1108,72 +1303,120 @@
               </div>
             </template>
 
-            <template v-else-if="activeMenu === 'permissions'">
+            <template v-else-if="activeMenu === 'ecu-rules'">
+              <div class="panel" style="margin-bottom:16px;display:flex;justify-content:space-between;align-items:center;">
+                <div>
+                  <div class="panel-title" style="margin-bottom:4px;">ECU规则管理</div>
+                  <div class="muted">从管理员视角出发：先选 ECU，再看识别规则，再给功能增加变体和补丁，不需要手动记忆一堆 ID。</div>
+                </div>
+                <a-space>
+                  <a-button @click="loadEcuRules">刷新</a-button>
+                </a-space>
+              </div>
               <div class="content-grid three-col">
                 <div class="panel">
                   <div class="section-row">
-                    <div class="panel-title" style="margin:0;">用户列表</div>
-                    <div class="muted">{{ users.length }} 人</div>
+                    <div class="panel-title" style="margin:0;">ECU型号列表</div>
+                    <div class="muted">{{ filteredEcuRules.length }} 个</div>
                   </div>
+                  <a-input-search v-model="ecuRuleSearch" placeholder="搜索 ECU 型号 / 车系" allow-clear style="margin-bottom:12px;" />
                   <div class="user-list">
-                    <div v-for="user in users" :key="user.id" class="user-card" :class="{ active: selectedUser && selectedUser.id === user.id }" @click="selectedUser = user; loadUserPermissions()">
-                      <div class="user-name">{{ user.name }}</div>
-                      <div class="muted">{{ user.phone }}</div>
+                    <div v-for="item in filteredEcuRules" :key="item.id" class="user-card" :class="{ active: selectedEcuRule && selectedEcuRule.id === item.id }" @click="selectedEcuRule = item; loadEcuRuleDetail(item.id)">
+                      <div class="user-name">{{ item.name }}</div>
+                      <div class="muted">{{ item.car_series_name || '-' }}</div>
                       <div class="meta-row">
-                        <a-tag size="small" :color="user.status === 'enabled' ? 'green' : (user.status === 'pending' ? 'orange' : 'red')">{{ statusLabel(user.status) }}</a-tag>
-                        <a-tag size="small">功能 {{ user.permission_count || 0 }}</a-tag>
+                        <a-tag size="small">识别 {{ item.identify_rule_count || 0 }}</a-tag>
+                        <a-tag size="small">功能 {{ item.function_count || 0 }}</a-tag>
                       </div>
                     </div>
                   </div>
                 </div>
 
                 <div class="panel">
-                  <div class="section-row">
-                    <div class="panel-title" style="margin:0;">功能列表</div>
-                    <a-input-search v-model="permissionSearch" placeholder="搜索功能" style="width:260px;" allow-clear />
-                  </div>
-                  <div class="tree-scroll">
-                    <a-checkbox-group v-model="selectedFunctionIds" style="display:grid;gap:12px;">
-                      <div class="chip-wrap">
-                        <a-checkbox v-for="func in filteredTree" :key="func.id" :value="func.id">{{ func.label }}</a-checkbox>
-                      </div>
-                    </a-checkbox-group>
-                  </div>
-                </div>
-
-                <div class="panel">
-                  <div class="panel-title">授权配置</div>
-                  <template v-if="selectedUser">
-                    <div class="list-line">
+                  <div class="panel-title">规则详情</div>
+                  <template v-if="ecuRuleDetail">
+                    <div class="list-line" style="margin-bottom:12px;">
                       <div>
-                        <div style="font-weight:600;">{{ selectedUser.name }}</div>
-                        <div class="muted">{{ selectedUser.phone }}</div>
+                        <div style="font-weight:600;">{{ ecuRuleDetail.model.name }}</div>
+                        <div class="muted">{{ ecuRuleDetail.model.car_series_name || '-' }}</div>
                       </div>
-                      <a-tag :color="selectedUser.status === 'enabled' ? 'green' : (selectedUser.status === 'pending' ? 'orange' : 'red')">{{ statusLabel(selectedUser.status) }}</a-tag>
+                      <a-tag>ECU ID {{ ecuRuleDetail.model.id }}</a-tag>
                     </div>
-                    <div style="margin-top:14px;display:grid;gap:10px;">
-                      <a-button type="primary" @click="selectedFunctionIds = Array.from(new Set(filteredTree.map(func => func.id)))">一键全部授权</a-button>
-                      <a-button @click="selectedFunctionIds = []">清空全部授权</a-button>
+                    <div class="panel-title" style="font-size:16px;">识别规则</div>
+                    <div class="table-like" style="margin-bottom:16px;max-height:180px;overflow:auto;">
+                      <div class="list-line" v-for="rule in ecuRuleDetail.identify_rules" :key="rule.id">
+                        <div>
+                          <div style="font-weight:600;">0x{{ Number(rule.addr).toString(16).toUpperCase() }}</div>
+                          <div class="muted">长度 {{ rule.data_length }}</div>
+                        </div>
+                        <div style="text-align:right;">
+                          <div class="muted" style="max-width:260px;word-break:break-all;">{{ rule.hex_value }}</div>
+                          <a-space style="margin-top:6px;">
+                            <a-button size="mini" @click="openIdentifyRuleModal(rule)">编辑</a-button>
+                            <a-button size="mini" status="danger" @click="deleteIdentifyRule(rule)">删除</a-button>
+                          </a-space>
+                        </div>
+                      </div>
                     </div>
-                    <div style="margin-top:14px;">
-                      <div class="muted" style="margin-bottom:8px;">已选功能数</div>
-                      <div class="stat-value" style="font-size:24px;">{{ selectedFunctionIds.length }}</div>
-                    </div>
-                    <div style="margin-top:14px;">
-                      <div class="muted" style="margin-bottom:8px;">到期时间</div>
-                      <a-input v-model="permissionEndAt" placeholder="2026-12-31 23:59:59" />
-                    </div>
-                    <div style="margin-top:14px;">
-                      <div class="muted" style="margin-bottom:8px;">授权说明</div>
-                      <div class="muted">当前只按功能授权，不按车型授权。可直接一键全选，也可逐项勾选功能开通。</div>
-                    </div>
-                    <div class="footer-actions">
-                      <a-button type="primary" @click="savePermissions">保存授权</a-button>
+                    <div class="panel-title" style="font-size:16px;">功能与变体</div>
+                    <div class="table-like" style="max-height:360px;overflow:auto;">
+                      <div class="list-line" v-for="func in ecuRuleDetail.functions" :key="func.id" style="display:block;">
+                        <div class="section-row" style="align-items:flex-start;">
+                          <div>
+                            <div style="font-weight:600;">{{ func.name }}</div>
+                            <div class="muted" style="margin-top:4px;">{{ func.success_msg || '无成功提示' }}</div>
+                          </div>
+                          <a-space direction="vertical" size="mini">
+                            <a-button size="mini" @click="openFunctionModal(func)">编辑功能</a-button>
+                            <a-button size="mini" @click="prepareVariantForm(func)">给此功能新增变体</a-button>
+                          </a-space>
+                        </div>
+                        <div v-if="!(func.variants || []).length" class="muted" style="margin:8px 0 10px 0;">暂无识别码变体</div>
+                        <div v-for="variant in func.variants" :key="variant.id" style="padding:10px 0 10px 12px;border-left:2px solid rgba(84,142,238,0.35);margin:8px 0;">
+                          <div class="section-row" style="align-items:flex-start;">
+                            <div>
+                              <div style="font-size:12px;color:#93c5fd;word-break:break-all;">变体ID {{ variant.id }} · {{ variant.identify_hex }}</div>
+                              <div class="muted">补丁数 {{ (variant.patches || []).length }}</div>
+                            </div>
+                            <a-space direction="vertical" size="mini">
+                              <a-button size="mini" @click="preparePatchForm(variant)">给此变体新增补丁</a-button>
+                              <a-button size="mini" status="danger" @click="deleteVariant(variant)">删除变体</a-button>
+                            </a-space>
+                          </div>
+                          <div v-if="(variant.patches || []).length" style="margin-top:8px;display:grid;gap:6px;">
+                            <div v-for="patch in variant.patches" :key="patch.id" class="section-row" style="margin:0;align-items:center;">
+                              <div class="muted" style="font-size:12px;">#{{ patch.seq_no }} · 0x{{ Number(patch.addr).toString(16).toUpperCase() }} · 长度 {{ patch.data_length }} · 值 {{ patch.value_hex }}</div>
+                              <a-space>
+                                <a-button size="mini" @click="preparePatchForm(variant, patch)">编辑</a-button>
+                                <a-button size="mini" status="danger" @click="deletePatch(patch)">删除</a-button>
+                              </a-space>
+                            </div>
+                          </div>
+                        </div>
+                      </div>
                     </div>
                   </template>
                   <template v-else>
-                    <div class="muted">请先从左侧选择一个用户</div>
+                    <div class="muted">请选择左侧 ECU 型号</div>
                   </template>
+                </div>
+
+                <div class="panel">
+                  <div class="panel-title">快捷操作</div>
+                  <div class="muted" style="margin-bottom:14px;">管理员常用动作应尽量少填字段，优先通过点选详情触发弹窗录入。</div>
+                  <div style="display:grid;gap:12px;">
+                    <a-button type="primary" @click="openIdentifyRuleModal">新增识别规则</a-button>
+                    <a-button type="primary" @click="openFunctionModal">新增功能</a-button>
+                    <a-button @click="selectedEcuRule && loadEcuRuleDetail(selectedEcuRule.id)">刷新当前详情</a-button>
+                  </div>
+                  <div style="margin-top:18px;display:grid;gap:10px;">
+                    <div class="muted">建议操作顺序</div>
+                    <div class="muted">1. 左侧选中 ECU</div>
+                    <div class="muted">2. 先新增识别规则</div>
+                    <div class="muted">3. 再新增功能</div>
+                    <div class="muted">4. 在中间点“给此功能新增变体”</div>
+                    <div class="muted">5. 在中间点“给此变体新增补丁”</div>
+                  </div>
                 </div>
               </div>
             </template>
@@ -1384,6 +1627,40 @@
               </div>
             </template>
 
+            <a-modal v-model:visible="identifyRuleVisible" title="新增识别规则" @ok="createIdentifyRule">
+              <a-form layout="vertical">
+                <a-form-item label="地址"><a-input v-model="identifyRuleForm.addr" placeholder="支持十进制或 0x20008" /></a-form-item>
+                <a-form-item label="长度"><a-input v-model="identifyRuleForm.data_length" placeholder="例如 21" /></a-form-item>
+                <a-form-item label="识别十六进制"><a-textarea v-model="identifyRuleForm.hex_value" :auto-size="{ minRows: 3, maxRows: 5 }" /></a-form-item>
+              </a-form>
+            </a-modal>
+
+            <a-modal v-model:visible="ecuFunctionVisible" title="新增功能" @ok="createEcuFunction">
+              <a-form layout="vertical">
+                <a-form-item label="功能名称"><a-input v-model="ecuFunctionForm.name" placeholder="例如：关闭防盗" /></a-form-item>
+                <a-form-item label="成功提示"><a-input v-model="ecuFunctionForm.success_msg" placeholder="例如：关闭防盗成功" /></a-form-item>
+              </a-form>
+            </a-modal>
+
+            <a-modal v-model:visible="ecuVariantVisible" title="新增功能变体" @ok="createVariant">
+              <a-form layout="vertical">
+                <a-form-item label="功能ID"><a-input v-model="ecuVariantForm.function_id" readonly /></a-form-item>
+                <a-form-item label="识别十六进制"><a-textarea v-model="ecuVariantForm.identify_hex" :auto-size="{ minRows: 3, maxRows: 5 }" /></a-form-item>
+              </a-form>
+            </a-modal>
+
+            <a-modal v-model:visible="ecuPatchVisible" title="新增补丁地址" @ok="createPatch">
+              <a-form layout="vertical">
+                <a-form-item label="变体ID"><a-input v-model="ecuPatchForm.variant_id" readonly /></a-form-item>
+                <a-grid :cols="2" :col-gap="12">
+                  <a-grid-item><a-form-item label="序号"><a-input v-model="ecuPatchForm.seq_no" /></a-form-item></a-grid-item>
+                  <a-grid-item><a-form-item label="长度"><a-input v-model="ecuPatchForm.data_length" placeholder="例如 1 / 2 / 4" /></a-form-item></a-grid-item>
+                </a-grid>
+                <a-form-item label="地址"><a-input v-model="ecuPatchForm.addr" placeholder="支持十进制或 0x2028A8" /></a-form-item>
+                <a-form-item label="值"><a-input v-model="ecuPatchForm.value_hex" placeholder="例如 00 / 0000 / 00000000" /></a-form-item>
+              </a-form>
+            </a-modal>
+
             <a-modal v-model:visible="createVisible" title="新建用户" @ok="createUser">
               <a-form layout="vertical">
                 <a-form-item label="姓名"><a-input v-model="createForm.name" /></a-form-item>
@@ -1404,6 +1681,18 @@
                 <a-form-item label="新密码">
                   <a-input-password v-model="resetPasswordForm.password" placeholder="请输入新密码" />
                 </a-form-item>
+              </a-form>
+            </a-modal>
+
+            <a-modal v-model:visible="authUserVisible" :title="'设置授权 - ' + (authUser ? authUser.name : '')" @ok="saveUserAuth">
+              <a-form layout="vertical">
+                <a-form-item label="授权时长">
+                  <a-select v-model="authForm.auth_days">
+                    <a-option :value="365">365天</a-option>
+                    <a-option :value="3650">3650天</a-option>
+                  </a-select>
+                </a-form-item>
+                <div class="muted">保存后该用户登录端会显示已授权，到期后仅保留免费项目可用。</div>
               </a-form>
             </a-modal>
 

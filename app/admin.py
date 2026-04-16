@@ -4,10 +4,10 @@ from urllib.parse import quote, urlparse
 
 from fastapi import APIRouter, Depends, File, HTTPException, UploadFile
 from pydantic import BaseModel, Field
-from sqlalchemy import text
+from sqlalchemy import text, bindparam
 
 from app.db import get_conn
-from app.security import get_current_user, now_str, require_admin
+from app.security import future_str, get_current_user, now_str, require_admin
 from app.settings import settings
 from app.storage import build_object_url, remove_object, upload_bytes
 
@@ -28,6 +28,10 @@ class AdminResetPasswordIn(BaseModel):
 
 class AdminRejectUserIn(BaseModel):
     reason: str = Field(default="待补充资料", max_length=255)
+
+
+class UserAuthSaveIn(BaseModel):
+    auth_days: int = Field(default=365)
 
 
 class PermissionSaveIn(BaseModel):
@@ -89,6 +93,34 @@ class LearningArticleSaveIn(BaseModel):
     content_html: str = Field(default="")
     sort_order: int = Field(default=0)
     is_enabled: int = Field(default=1)
+
+
+class AdminIdentifyRuleSaveIn(BaseModel):
+    ecu_model_id: int
+    addr: int
+    data_length: int
+    hex_value: str = Field(default="", max_length=255)
+
+
+class AdminFunctionSaveIn(BaseModel):
+    ecu_model_id: int
+    name: str = Field(default="", max_length=128)
+    success_msg: str = Field(default="", max_length=255)
+    sort_order: int = Field(default=0)
+    is_enabled: int = Field(default=1)
+
+
+class AdminFunctionVariantSaveIn(BaseModel):
+    function_id: int
+    identify_hex: str = Field(default="", max_length=255)
+
+
+class AdminFunctionPatchSaveIn(BaseModel):
+    variant_id: int
+    seq_no: int = Field(default=0)
+    addr: int
+    data_length: int
+    value_hex: str = Field(default="")
 
 
 def _admin_guard(user: dict = Depends(get_current_user)) -> dict:
@@ -263,26 +295,11 @@ def dashboard(_: dict = Depends(_admin_guard)) -> dict:
         active_users = conn.execute(
             text("SELECT COUNT(*) AS c FROM app_user WHERE status = 'enabled'")
         ).mappings().first()["c"]
-        total_permissions = conn.execute(
-            text(
-                """
-                SELECT COUNT(DISTINCT f.name) AS c
-                FROM app_user_function_permission p
-                LEFT JOIN ecu_function f ON f.id = p.function_id
-                WHERE p.status = 'enabled'
-                """
-            )
+        pending_users = conn.execute(
+            text("SELECT COUNT(*) AS c FROM app_user WHERE status = 'pending'")
         ).mappings().first()["c"]
-        expiring_soon = conn.execute(
-            text(
-                """
-                SELECT COUNT(*) AS c
-                FROM app_user_function_permission
-                WHERE status = 'enabled'
-                  AND end_at IS NOT NULL
-                  AND end_at BETWEEN NOW() AND DATE_ADD(NOW(), INTERVAL 7 DAY)
-                """
-            )
+        bound_devices = conn.execute(
+            text("SELECT COUNT(*) AS c FROM app_user WHERE device_id IS NOT NULL AND device_id <> ''")
         ).mappings().first()["c"]
         recent_users = conn.execute(
             text(
@@ -308,8 +325,8 @@ def dashboard(_: dict = Depends(_admin_guard)) -> dict:
         "summary": {
             "total_users": total_users,
             "active_users": active_users,
-            "total_permissions": total_permissions,
-            "expiring_soon": expiring_soon,
+            "pending_users": pending_users,
+            "bound_devices": bound_devices,
         },
         "recent_users": [dict(row) for row in recent_users],
         "recent_logs": [dict(row) for row in recent_logs],
@@ -330,16 +347,10 @@ def list_users(_: dict = Depends(_admin_guard)) -> dict:
             u.device_id,
             u.device_name,
             u.device_bound_at,
+            u.auth_end_at,
             u.created_at,
-            u.last_login_at,
-            COUNT(DISTINCT f.name) AS permission_count,
-            MAX(p.end_at) AS permission_end_at
+            u.last_login_at
         FROM app_user u
-        LEFT JOIN app_user_function_permission p
-          ON p.user_id = u.id AND p.status = 'enabled'
-        LEFT JOIN ecu_function f
-          ON f.id = p.function_id
-        GROUP BY u.id, u.phone, u.name, u.status, u.approval_note, u.is_admin, u.device_id, u.device_name, u.device_bound_at, u.created_at, u.last_login_at
         ORDER BY u.id DESC
         """
     )
@@ -444,9 +455,10 @@ def approve_user(user_id: int, admin: dict = Depends(_admin_guard)) -> dict:
         if not row:
             raise HTTPException(status_code=404, detail="user not found")
         now = now_str()
+        auth_end_at = future_str(365)
         conn.execute(
-            text("UPDATE app_user SET status = 'enabled', approval_note = NULL, updated_at = :updated_at WHERE id = :id"),
-            {"updated_at": now, "id": user_id},
+            text("UPDATE app_user SET status = 'enabled', approval_note = NULL, auth_end_at = :auth_end_at, updated_at = :updated_at WHERE id = :id"),
+            {"auth_end_at": auth_end_at, "updated_at": now, "id": user_id},
         )
         conn.execute(
             text(
@@ -459,12 +471,12 @@ def approve_user(user_id: int, admin: dict = Depends(_admin_guard)) -> dict:
                 "user_id": admin["id"],
                 "actor_name": admin["name"],
                 "target_id": str(user_id),
-                "detail": f"name={row['name']};status=enabled",
+                "detail": f"name={row['name']};status=enabled;auth_end_at={auth_end_at}",
                 "created_at": now,
             },
         )
         conn.commit()
-    return {"ok": True, "status": "enabled"}
+    return {"ok": True, "status": "enabled", "auth_end_at": auth_end_at}
 
 
 @router.post("/users/{user_id}/reject")
@@ -499,6 +511,43 @@ def reject_user(user_id: int, payload: AdminRejectUserIn, admin: dict = Depends(
         )
         conn.commit()
     return {"ok": True, "status": "disabled"}
+
+
+@router.post("/users/{user_id}/auth")
+def save_user_auth(user_id: int, payload: UserAuthSaveIn, admin: dict = Depends(_admin_guard)) -> dict:
+    auth_days = int(payload.auth_days or 0)
+    if auth_days not in {365, 3650}:
+        raise HTTPException(status_code=400, detail="auth_days only supports 365 or 3650")
+    now = now_str()
+    auth_end_at = future_str(auth_days)
+    with get_conn() as conn:
+        row = conn.execute(
+            text("SELECT id, name FROM app_user WHERE id = :id LIMIT 1"),
+            {"id": user_id},
+        ).mappings().first()
+        if not row:
+            raise HTTPException(status_code=404, detail="user not found")
+        conn.execute(
+            text("UPDATE app_user SET status = 'enabled', approval_note = NULL, auth_end_at = :auth_end_at, updated_at = :updated_at WHERE id = :id"),
+            {"auth_end_at": auth_end_at, "updated_at": now, "id": user_id},
+        )
+        conn.execute(
+            text(
+                """
+                INSERT INTO app_operation_log (user_id, actor_name, action, target_type, target_id, detail, created_at)
+                VALUES (:user_id, :actor_name, 'admin_set_user_auth', 'app_user', :target_id, :detail, :created_at)
+                """
+            ),
+            {
+                "user_id": admin["id"],
+                "actor_name": admin["name"],
+                "target_id": str(user_id),
+                "detail": f"name={row['name']};auth_days={auth_days};auth_end_at={auth_end_at}",
+                "created_at": now,
+            },
+        )
+        conn.commit()
+    return {"ok": True, "auth_days": auth_days, "auth_end_at": auth_end_at}
 
 
 @router.post("/users/{user_id}/unbind-device")
@@ -1154,6 +1203,398 @@ def delete_wiring_guide(guide_id: int, admin: dict = Depends(_admin_guard)) -> d
         )
         conn.commit()
     remove_object((existing.get("object_key") or "").strip())
+    return {"ok": True}
+
+
+@router.get("/ecu-rules")
+def list_ecu_rules(_: dict = Depends(_admin_guard)) -> dict:
+    sql = text(
+        """
+        SELECT
+            m.id,
+            cs.name AS car_series_name,
+            m.name,
+            COUNT(DISTINCT r.id) AS identify_rule_count,
+            COUNT(DISTINCT f.id) AS function_count
+        FROM ecu_model m
+        LEFT JOIN ecu_car_series cs ON cs.id = m.car_series_id
+        LEFT JOIN ecu_identify_rule r ON r.ecu_model_id = m.id
+        LEFT JOIN ecu_function f ON f.ecu_model_id = m.id AND f.is_enabled = 1
+        WHERE m.is_enabled = 1
+        GROUP BY m.id, cs.name, m.name
+        ORDER BY m.id ASC
+        """
+    )
+    with get_conn() as conn:
+        rows = conn.execute(sql).mappings().all()
+    return {"items": [dict(row) for row in rows]}
+
+
+@router.get("/ecu-rules/{ecu_model_id}")
+def get_ecu_rule_detail(ecu_model_id: int, _: dict = Depends(_admin_guard)) -> dict:
+    with get_conn() as conn:
+        model = conn.execute(
+            text(
+                """
+                SELECT m.id, m.name, cs.name AS car_series_name
+                FROM ecu_model m
+                LEFT JOIN ecu_car_series cs ON cs.id = m.car_series_id
+                WHERE m.id = :id
+                LIMIT 1
+                """
+            ),
+            {"id": ecu_model_id},
+        ).mappings().first()
+        if not model:
+            raise HTTPException(status_code=404, detail="ECU型号不存在")
+
+        identify_rules = conn.execute(
+            text(
+                """
+                SELECT id, ecu_model_id, addr, data_length, hex_value, created_at, updated_at
+                FROM ecu_identify_rule
+                WHERE ecu_model_id = :ecu_model_id
+                ORDER BY id ASC
+                """
+            ),
+            {"ecu_model_id": ecu_model_id},
+        ).mappings().all()
+
+        functions = conn.execute(
+            text(
+                """
+                SELECT id, ecu_model_id, name, success_msg, sort_order, is_enabled, created_at, updated_at
+                FROM ecu_function
+                WHERE ecu_model_id = :ecu_model_id
+                ORDER BY sort_order ASC, id ASC
+                """
+            ),
+            {"ecu_model_id": ecu_model_id},
+        ).mappings().all()
+
+        function_ids = [int(row["id"]) for row in functions]
+        variants = []
+        patches = []
+        if function_ids:
+            variants = conn.execute(
+                text(
+                    """
+                    SELECT id, function_id, identify_hex, created_at, updated_at
+                    FROM ecu_function_variant
+                    WHERE function_id IN :function_ids
+                    ORDER BY id ASC
+                    """
+                ).bindparams(bindparam("function_ids", expanding=True)),
+                {"function_ids": function_ids},
+            ).mappings().all()
+            variant_ids = [int(row["id"]) for row in variants]
+            if variant_ids:
+                patches = conn.execute(
+                    text(
+                        """
+                        SELECT id, variant_id, seq_no, addr, data_length, value_hex, created_at, updated_at
+                        FROM ecu_function_patch
+                        WHERE variant_id IN :variant_ids
+                        ORDER BY seq_no ASC, id ASC
+                        """
+                    ).bindparams(bindparam("variant_ids", expanding=True)),
+                    {"variant_ids": variant_ids},
+                ).mappings().all()
+
+    patch_map = {}
+    for row in patches:
+        patch_map.setdefault(int(row["variant_id"]), []).append(dict(row))
+
+    variant_map = {}
+    for row in variants:
+        item = dict(row)
+        item["patches"] = patch_map.get(int(row["id"]), [])
+        variant_map.setdefault(int(row["function_id"]), []).append(item)
+
+    function_items = []
+    for row in functions:
+        item = dict(row)
+        item["variants"] = variant_map.get(int(row["id"]), [])
+        function_items.append(item)
+
+    return {
+        "model": dict(model),
+        "identify_rules": [dict(row) for row in identify_rules],
+        "functions": function_items,
+    }
+
+
+@router.post("/ecu-rules/identify-rule")
+def create_identify_rule(payload: AdminIdentifyRuleSaveIn, admin: dict = Depends(_admin_guard)) -> dict:
+    hex_value = payload.hex_value.strip().upper()
+    if not hex_value:
+        raise HTTPException(status_code=400, detail="识别十六进制不能为空")
+    now = now_str()
+    with get_conn() as conn:
+        exists = conn.execute(
+            text(
+                """
+                SELECT id FROM ecu_identify_rule
+                WHERE ecu_model_id = :ecu_model_id AND addr = :addr AND data_length = :data_length AND hex_value = :hex_value
+                LIMIT 1
+                """
+            ),
+            {
+                "ecu_model_id": payload.ecu_model_id,
+                "addr": payload.addr,
+                "data_length": payload.data_length,
+                "hex_value": hex_value,
+            },
+        ).mappings().first()
+        if exists:
+            raise HTTPException(status_code=409, detail="识别规则已存在")
+        conn.execute(
+            text(
+                """
+                INSERT INTO ecu_identify_rule (ecu_model_id, addr, data_length, hex_value, created_at, updated_at)
+                VALUES (:ecu_model_id, :addr, :data_length, :hex_value, :created_at, :updated_at)
+                """
+            ),
+            {
+                "ecu_model_id": payload.ecu_model_id,
+                "addr": payload.addr,
+                "data_length": payload.data_length,
+                "hex_value": hex_value,
+                "created_at": now,
+                "updated_at": now,
+            },
+        )
+        conn.commit()
+    return {"ok": True}
+
+
+@router.post("/ecu-rules/function")
+def create_ecu_function(payload: AdminFunctionSaveIn, admin: dict = Depends(_admin_guard)) -> dict:
+    name = payload.name.strip()
+    if not name:
+        raise HTTPException(status_code=400, detail="功能名称不能为空")
+    now = now_str()
+    with get_conn() as conn:
+        exists = conn.execute(
+            text("SELECT id FROM ecu_function WHERE ecu_model_id = :ecu_model_id AND name = :name LIMIT 1"),
+            {"ecu_model_id": payload.ecu_model_id, "name": name},
+        ).mappings().first()
+        if exists:
+            raise HTTPException(status_code=409, detail="功能已存在")
+        conn.execute(
+            text(
+                """
+                INSERT INTO ecu_function (ecu_model_id, name, success_msg, sort_order, is_enabled, created_at, updated_at)
+                VALUES (:ecu_model_id, :name, :success_msg, :sort_order, :is_enabled, :created_at, :updated_at)
+                """
+            ),
+            {
+                "ecu_model_id": payload.ecu_model_id,
+                "name": name,
+                "success_msg": payload.success_msg.strip(),
+                "sort_order": payload.sort_order,
+                "is_enabled": 1 if payload.is_enabled else 0,
+                "created_at": now,
+                "updated_at": now,
+            },
+        )
+        conn.commit()
+    return {"ok": True}
+
+
+@router.post("/ecu-rules/variant")
+def create_function_variant(payload: AdminFunctionVariantSaveIn, admin: dict = Depends(_admin_guard)) -> dict:
+    identify_hex = payload.identify_hex.strip().upper()
+    if not identify_hex:
+        raise HTTPException(status_code=400, detail="识别十六进制不能为空")
+    now = now_str()
+    with get_conn() as conn:
+        exists = conn.execute(
+            text("SELECT id FROM ecu_function_variant WHERE function_id = :function_id AND identify_hex = :identify_hex LIMIT 1"),
+            {"function_id": payload.function_id, "identify_hex": identify_hex},
+        ).mappings().first()
+        if exists:
+            raise HTTPException(status_code=409, detail="功能变体已存在")
+        conn.execute(
+            text(
+                """
+                INSERT INTO ecu_function_variant (function_id, identify_hex, created_at, updated_at)
+                VALUES (:function_id, :identify_hex, :created_at, :updated_at)
+                """
+            ),
+            {
+                "function_id": payload.function_id,
+                "identify_hex": identify_hex,
+                "created_at": now,
+                "updated_at": now,
+            },
+        )
+        conn.commit()
+    return {"ok": True}
+
+
+@router.post("/ecu-rules/patch")
+def create_function_patch(payload: AdminFunctionPatchSaveIn, admin: dict = Depends(_admin_guard)) -> dict:
+    value_hex = payload.value_hex.strip().upper()
+    if not value_hex:
+        raise HTTPException(status_code=400, detail="补丁值不能为空")
+    now = now_str()
+    with get_conn() as conn:
+        conn.execute(
+            text(
+                """
+                INSERT INTO ecu_function_patch (variant_id, seq_no, addr, data_length, value_hex, created_at, updated_at)
+                VALUES (:variant_id, :seq_no, :addr, :data_length, :value_hex, :created_at, :updated_at)
+                """
+            ),
+            {
+                "variant_id": payload.variant_id,
+                "seq_no": payload.seq_no,
+                "addr": payload.addr,
+                "data_length": payload.data_length,
+                "value_hex": value_hex,
+                "created_at": now,
+                "updated_at": now,
+            },
+        )
+        conn.commit()
+    return {"ok": True}
+
+
+@router.put("/ecu-rules/identify-rule/{rule_id}")
+def update_identify_rule(rule_id: int, payload: AdminIdentifyRuleSaveIn, admin: dict = Depends(_admin_guard)) -> dict:
+    hex_value = payload.hex_value.strip().upper()
+    if not hex_value:
+        raise HTTPException(status_code=400, detail="识别十六进制不能为空")
+    now = now_str()
+    with get_conn() as conn:
+        exists = conn.execute(text("SELECT id FROM ecu_identify_rule WHERE id = :id LIMIT 1"), {"id": rule_id}).mappings().first()
+        if not exists:
+            raise HTTPException(status_code=404, detail="识别规则不存在")
+        conn.execute(
+            text(
+                """
+                UPDATE ecu_identify_rule
+                SET addr = :addr,
+                    data_length = :data_length,
+                    hex_value = :hex_value,
+                    updated_at = :updated_at
+                WHERE id = :id
+                """
+            ),
+            {
+                "id": rule_id,
+                "addr": payload.addr,
+                "data_length": payload.data_length,
+                "hex_value": hex_value,
+                "updated_at": now,
+            },
+        )
+        conn.commit()
+    return {"ok": True}
+
+
+@router.delete("/ecu-rules/identify-rule/{rule_id}")
+def delete_identify_rule(rule_id: int, admin: dict = Depends(_admin_guard)) -> dict:
+    with get_conn() as conn:
+        exists = conn.execute(text("SELECT id FROM ecu_identify_rule WHERE id = :id LIMIT 1"), {"id": rule_id}).mappings().first()
+        if not exists:
+            raise HTTPException(status_code=404, detail="识别规则不存在")
+        conn.execute(text("DELETE FROM ecu_identify_rule WHERE id = :id"), {"id": rule_id})
+        conn.commit()
+    return {"ok": True}
+
+
+@router.put("/ecu-rules/function/{function_id}")
+def update_ecu_function(function_id: int, payload: AdminFunctionSaveIn, admin: dict = Depends(_admin_guard)) -> dict:
+    name = payload.name.strip()
+    if not name:
+        raise HTTPException(status_code=400, detail="功能名称不能为空")
+    now = now_str()
+    with get_conn() as conn:
+        exists = conn.execute(text("SELECT id FROM ecu_function WHERE id = :id LIMIT 1"), {"id": function_id}).mappings().first()
+        if not exists:
+            raise HTTPException(status_code=404, detail="功能不存在")
+        conn.execute(
+            text(
+                """
+                UPDATE ecu_function
+                SET name = :name,
+                    success_msg = :success_msg,
+                    sort_order = :sort_order,
+                    is_enabled = :is_enabled,
+                    updated_at = :updated_at
+                WHERE id = :id
+                """
+            ),
+            {
+                "id": function_id,
+                "name": name,
+                "success_msg": payload.success_msg.strip(),
+                "sort_order": payload.sort_order,
+                "is_enabled": 1 if payload.is_enabled else 0,
+                "updated_at": now,
+            },
+        )
+        conn.commit()
+    return {"ok": True}
+
+
+@router.put("/ecu-rules/patch/{patch_id}")
+def update_function_patch(patch_id: int, payload: AdminFunctionPatchSaveIn, admin: dict = Depends(_admin_guard)) -> dict:
+    value_hex = payload.value_hex.strip().upper()
+    if not value_hex:
+        raise HTTPException(status_code=400, detail="补丁值不能为空")
+    now = now_str()
+    with get_conn() as conn:
+        exists = conn.execute(text("SELECT id FROM ecu_function_patch WHERE id = :id LIMIT 1"), {"id": patch_id}).mappings().first()
+        if not exists:
+            raise HTTPException(status_code=404, detail="补丁不存在")
+        conn.execute(
+            text(
+                """
+                UPDATE ecu_function_patch
+                SET seq_no = :seq_no,
+                    addr = :addr,
+                    data_length = :data_length,
+                    value_hex = :value_hex,
+                    updated_at = :updated_at
+                WHERE id = :id
+                """
+            ),
+            {
+                "id": patch_id,
+                "seq_no": payload.seq_no,
+                "addr": payload.addr,
+                "data_length": payload.data_length,
+                "value_hex": value_hex,
+                "updated_at": now,
+            },
+        )
+        conn.commit()
+    return {"ok": True}
+
+
+@router.delete("/ecu-rules/variant/{variant_id}")
+def delete_function_variant(variant_id: int, admin: dict = Depends(_admin_guard)) -> dict:
+    with get_conn() as conn:
+        exists = conn.execute(text("SELECT id FROM ecu_function_variant WHERE id = :id LIMIT 1"), {"id": variant_id}).mappings().first()
+        if not exists:
+            raise HTTPException(status_code=404, detail="功能变体不存在")
+        conn.execute(text("DELETE FROM ecu_function_patch WHERE variant_id = :variant_id"), {"variant_id": variant_id})
+        conn.execute(text("DELETE FROM ecu_function_variant WHERE id = :id"), {"id": variant_id})
+        conn.commit()
+    return {"ok": True}
+
+
+@router.delete("/ecu-rules/patch/{patch_id}")
+def delete_function_patch(patch_id: int, admin: dict = Depends(_admin_guard)) -> dict:
+    with get_conn() as conn:
+        exists = conn.execute(text("SELECT id FROM ecu_function_patch WHERE id = :id LIMIT 1"), {"id": patch_id}).mappings().first()
+        if not exists:
+            raise HTTPException(status_code=404, detail="补丁不存在")
+        conn.execute(text("DELETE FROM ecu_function_patch WHERE id = :id"), {"id": patch_id})
+        conn.commit()
     return {"ok": True}
 
 

@@ -13,6 +13,7 @@ import uuid
 import warnings
 import urllib.parse
 import urllib.request
+import urllib.error
 import tempfile
 import re
 import base64
@@ -48,7 +49,7 @@ def _resource_path(*parts):
     return os.path.join(base_dir, *parts)
 
 
-API_BASE_URL = os.environ.get("ECUFLASH_API_BASE_URL", "http://107.148.176.142:8000/api/v1").rstrip("/")
+API_BASE_URL = os.environ.get("ECUFLASH_API_BASE_URL", "http://127.0.0.1:8000/api/v1").rstrip("/")
 APP_VERSION = "1.0.0"
 APP_LOGO_FILE = "icon.jpg"
 APP_LOGO_URL = ""
@@ -611,6 +612,29 @@ def _api_get_json(path, params=None, timeout=15):
         return json.loads(raw)
 
 
+def _friendly_api_error(path, status, detail):
+    detail_text = str(detail or "").strip()
+    if path == "/auth/register":
+        if status == 409 or detail_text == "phone already exists":
+            return "注册失败：该账号已存在，请直接登录或更换账号。"
+        if status == 403 and detail_text == "registered_pending_approval":
+            return "注册成功，请联系管理员授权账户后再登录。"
+        if status == 400 and detail_text == "password required":
+            return "注册失败：请输入密码。"
+    if path == "/auth/login":
+        if status == 401 or detail_text == "invalid phone or password":
+            return "登录失败：账号或密码错误。"
+        if status == 403 and detail_text == "user pending approval":
+            return "登录失败：当前账号正在等待管理员审批。"
+        if status == 403 and detail_text == "user disabled":
+            return "登录失败：当前账号已被停用，请联系管理员。"
+        if status == 403 and detail_text == "device mismatch":
+            return "登录失败：当前账号已绑定其他设备，请联系管理员解绑。"
+    if detail_text:
+        return f"请求失败（HTTP {status}）：{detail_text}"
+    return f"请求失败：HTTP {status}"
+
+
 def _api_request_json(path, method="GET", data=None, token=None, timeout=20):
     url = f"{API_BASE_URL}{path}"
     body = None
@@ -623,12 +647,64 @@ def _api_request_json(path, method="GET", data=None, token=None, timeout=20):
 
     print(f"[API] {method} {url}")
     request = urllib.request.Request(url, data=body, headers=headers, method=method)
-    with urllib.request.urlopen(request, timeout=timeout) as response:
-        raw = response.read().decode("utf-8")
-        print(f"[API] STATUS {response.status}")
-        preview = raw if len(raw) <= 1200 else raw[:1200] + "...(truncated)"
-        print(f"[API] RESPONSE {preview}")
-        return json.loads(raw)
+    try:
+        with urllib.request.urlopen(request, timeout=timeout) as response:
+            raw = response.read().decode("utf-8")
+            print(f"[API] STATUS {response.status}")
+            preview = raw if len(raw) <= 1200 else raw[:1200] + "...(truncated)"
+            print(f"[API] RESPONSE {preview}")
+            return json.loads(raw)
+    except urllib.error.HTTPError as exc:
+        raw = exc.read().decode("utf-8", errors="ignore") if hasattr(exc, "read") else ""
+        print(f"[API] STATUS {exc.code}")
+        if raw:
+            preview = raw if len(raw) <= 1200 else raw[:1200] + "...(truncated)"
+            print(f"[API] RESPONSE {preview}")
+        detail = ""
+        try:
+            payload = json.loads(raw) if raw else {}
+            detail = payload.get("detail") or payload.get("message") or raw
+        except Exception:
+            detail = raw or exc.reason
+        raise RuntimeError(_friendly_api_error(path, exc.code, detail))
+    except urllib.error.URLError as exc:
+        raise RuntimeError(f"网络连接失败：{exc.reason}")
+
+
+def _api_upload_file(path, file_path, token=None, timeout=60):
+    url = f"{API_BASE_URL}{path}"
+    boundary = f"----PiBoundary{uuid.uuid4().hex}"
+    file_name = os.path.basename(file_path)
+    with open(file_path, "rb") as f:
+        file_bytes = f.read()
+    body = bytearray()
+    body.extend(f"--{boundary}\r\n".encode("utf-8"))
+    body.extend(f'Content-Disposition: form-data; name="file"; filename="{file_name}"\r\n'.encode("utf-8"))
+    body.extend(b"Content-Type: application/octet-stream\r\n\r\n")
+    body.extend(file_bytes)
+    body.extend(f"\r\n--{boundary}--\r\n".encode("utf-8"))
+    headers = {
+        "Accept": "application/json",
+        "Content-Type": f"multipart/form-data; boundary={boundary}",
+    }
+    if token:
+        headers["Authorization"] = f"Bearer {token}"
+    request = urllib.request.Request(url, data=bytes(body), headers=headers, method="POST")
+    try:
+        with urllib.request.urlopen(request, timeout=timeout) as response:
+            raw = response.read().decode("utf-8")
+            return json.loads(raw)
+    except urllib.error.HTTPError as exc:
+        raw = exc.read().decode("utf-8", errors="ignore") if hasattr(exc, "read") else ""
+        detail = raw
+        try:
+            payload = json.loads(raw) if raw else {}
+            detail = payload.get("detail") or raw
+        except Exception:
+            pass
+        raise RuntimeError(_friendly_api_error(path, exc.code, detail))
+    except urllib.error.URLError as exc:
+        raise RuntimeError(f"网络连接失败：{exc.reason}")
 
 
 def load_remote_runtime_dataset(token):
@@ -667,6 +743,8 @@ def fetch_my_permissions(token):
     return {
         "ids": set(int(item) for item in data.get("function_ids", []) if str(item).isdigit()),
         "names": set(str(item).strip() for item in data.get("function_names", []) if str(item).strip()),
+        "auth_end_at": data.get("auth_end_at"),
+        "auth_status": data.get("auth_status") or "unauthorized",
     }
 
 
@@ -939,7 +1017,7 @@ class RegisterDialog(QDialog):
         self.title_label.setStyleSheet("color:#165DFF")
         layout.addWidget(self.title_label)
 
-        self.desc_label = QLabel("请输入账号和密码完成登录")
+        self.desc_label = QLabel("首次使用请先注册，注册成功后请联系管理员授权账户，再返回登录。")
         self.desc_label.setStyleSheet("color:#666666;font-size:15px;")
         layout.addWidget(self.desc_label)
 
@@ -981,10 +1059,17 @@ class RegisterDialog(QDialog):
             permissions = fetch_my_permissions(token)
             session["permission_function_ids"] = sorted(permissions["ids"])
             session["permission_function_names"] = sorted(permissions["names"])
+            session["auth_end_at"] = permissions.get("auth_end_at")
+            session["auth_status"] = permissions.get("auth_status") or "unauthorized"
+            if isinstance(session.get("user"), dict):
+                session["user"]["auth_end_at"] = session["auth_end_at"]
+                session["user"]["auth_status"] = session["auth_status"]
             session["purchase_config"] = fetch_purchase_config(token)
         except Exception:
             session["permission_function_ids"] = []
             session["permission_function_names"] = []
+            session["auth_end_at"] = None
+            session["auth_status"] = "unauthorized"
             session["purchase_config"] = {}
         return session
 
@@ -1039,7 +1124,11 @@ class RegisterDialog(QDialog):
             show_message(self, QMessageBox.Information, "成功", "注册并登录成功")
             self.accept()
         except Exception as exc:
-            show_message(self, QMessageBox.Critical, "错误", f"注册失败：{exc}")
+            exc_text = str(exc)
+            if "注册成功，请联系管理员授权账户后再登录。" in exc_text:
+                show_message(self, QMessageBox.Information, "提示", exc_text)
+            else:
+                show_message(self, QMessageBox.Critical, "错误", f"注册失败：{exc_text}")
 
 
 class InlineSelect(QComboBox):
@@ -1065,6 +1154,7 @@ class ECUFlashWindow(QMainWindow):
         self.allowed_function_ids = set(int(item) for item in self.license_data.get("permission_function_ids", []))
         self.allowed_function_names = set(str(item).strip() for item in self.license_data.get("permission_function_names", []) if str(item).strip())
         self.purchase_config = self.license_data.get("purchase_config") or {}
+        self.auth_status_label = None
         self._dragging = False
         self._drag_pos = QPoint()
         self._setup_ui()
@@ -1248,6 +1338,7 @@ class ECUFlashWindow(QMainWindow):
 
         resource_download_btn = QPushButton("文件下载")
         learning_btn = QPushButton("学习资料")
+        learning_btn.hide()
         wiring_guide_btn = QPushButton("接线图查询")
         checksum_btn = QPushButton("计算校验和")
         purchase_btn = QPushButton("开通功能")
@@ -1444,8 +1535,8 @@ class ECUFlashWindow(QMainWindow):
         right_layout.setSpacing(10)
         right_layout.setContentsMargins(10, 8, 10, 10)
 
-        search_title = QLabel("搜索ECU型号")
-        search_title.setStyleSheet("""
+        ecu_info_title = QLabel("ECU识别结果")
+        ecu_info_title.setStyleSheet("""
             QLabel {
                 font-size: 18px;
                 font-weight: bold;
@@ -1453,109 +1544,20 @@ class ECUFlashWindow(QMainWindow):
                 padding: 2px 0 4px 2px;
             }
         """)
-        right_layout.addWidget(search_title)
+        right_layout.addWidget(ecu_info_title)
 
-        search_row = QHBoxLayout()
-        search_row.setSpacing(10)
-        search_label = QLabel("ECU型号：")
-        search_label.setStyleSheet("""
-            QLabel {
-                font-size: 14px;
-                color: #80FFFF;
-                font-weight: bold;
-                min-width: 84px;
-            }
-        """)
-        search_label.setAlignment(Qt.AlignRight | Qt.AlignVCenter)
-        self.search_ecu_edit = QLineEdit()
-        self.search_ecu_edit.setStyleSheet("""
-            QLineEdit {
-                background-color: rgba(8, 26, 71, 0.98);
-                border: 1px solid rgba(85, 136, 225, 0.58);
-                border-radius: 9px;
-                color: #E8F1FF;
-                font-size: 14px;
-                padding: 8px 12px;
-                min-height: 46px;
-                max-height: 50px;
-            }
-        """)
-        self.search_ecu_edit.setPlaceholderText("输入 ECU 型号后回车，例如 ME7.8.8")
-        self.search_ecu_edit.returnPressed.connect(self.search_ecu_by_name)
-        search_row.addWidget(search_label)
-        search_row.addWidget(self.search_ecu_edit)
-        right_layout.addLayout(search_row)
+        self.ecu_car_value = QLabel("车系：未识别")
+        self.ecu_car_value.setStyleSheet("font-size:14px;color:#CFE4FF;padding:2px 0 0 2px;")
+        right_layout.addWidget(self.ecu_car_value)
 
-        car_layout = QHBoxLayout()
-        car_layout.setSpacing(10)
-        car_label = QLabel("车系：")
-        car_label.setStyleSheet("""
-            QLabel {
-                font-size: 14px;
-                color: #80FFFF;
-                font-weight: bold;
-                min-width: 84px;
-            }
-        """)
-        car_label.setAlignment(Qt.AlignRight | Qt.AlignVCenter)
-        self.car_combobox = InlineSelect("请选择车系")
-        self.car_combobox.addItems(ECU_DATABASE.keys())
-        self.car_combobox.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
-        self.car_combobox.setMaxVisibleItems(8)
-        self.car_combobox.currentTextChanged.connect(self.update_ecu_combobox)
-        self.car_combobox.view().setMinimumWidth(0)
-        car_layout.addWidget(car_label)
-        car_layout.addWidget(self.car_combobox)
-        right_layout.addLayout(car_layout)
+        self.ecu_name_value = QLabel("ECU：未识别")
+        self.ecu_name_value.setStyleSheet("font-size:14px;color:#CFE4FF;padding:0 0 0 2px;")
+        right_layout.addWidget(self.ecu_name_value)
 
-        ecu_layout = QHBoxLayout()
-        ecu_layout.setSpacing(10)
-        ecu_label = QLabel("ECU型号：")
-        ecu_label.setStyleSheet("""
-            QLabel {
-                font-size: 14px;
-                color: #80FFFF;
-                font-weight: bold;
-                min-width: 84px;
-            }
-        """)
-        ecu_label.setAlignment(Qt.AlignRight | Qt.AlignVCenter)
-        self.ecu_combobox = InlineSelect("请选择ECU型号")
-        self.ecu_combobox.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
-        self.ecu_combobox.setMaxVisibleItems(8)
-        self.ecu_combobox.view().setMinimumWidth(0)
-        ecu_layout.addWidget(ecu_label)
-        ecu_layout.addWidget(self.ecu_combobox)
-        right_layout.addLayout(ecu_layout)
-
-        self.update_ecu_combobox(self.car_combobox.currentText())
-
-        self.identify_btn = QPushButton("识别ECU")
-        self.identify_btn.clicked.connect(self.identify_ecu)
-        self.identify_btn.setEnabled(False)
-        self.identify_btn.setStyleSheet("""
-            QPushButton {
-                background: qlineargradient(x1:0,y1:0,x2:1,y2:0,stop:0 #2A65EE,stop:1 #3F8CFF);
-                color: #FFFFFF;
-                font-size: 16px;
-                font-weight: bold;
-                border: 1px solid rgba(157, 199, 255, 0.38);
-                border-radius: 10px;
-                padding: 10px 0;
-                min-height: 50px;
-                max-height: 54px;
-                margin-top: 8px;
-            }
-            QPushButton:hover {
-                background: qlineargradient(x1:0,y1:0,x2:1,y2:0,stop:0 #3A74F5,stop:1 #51A0FF);
-            }
-            QPushButton:disabled {
-                background: rgba(49, 62, 86, 0.88);
-                color: #7A869E;
-                border: 1px solid rgba(122, 134, 158, 0.35);
-            }
-        """)
-        right_layout.addWidget(self.identify_btn)
+        self.identify_hex_value = QLabel("识别码：未识别")
+        self.identify_hex_value.setStyleSheet("font-size:13px;color:#94A3B8;padding:0 0 4px 2px;")
+        self.identify_hex_value.setWordWrap(True)
+        right_layout.addWidget(self.identify_hex_value)
 
         self.result_label = QLabel("识别结果：等待识别")
         self.result_label.setStyleSheet("""
@@ -1579,7 +1581,7 @@ class ECUFlashWindow(QMainWindow):
         """)
         right_layout.addWidget(func_title)
 
-        self.func_tip_label = QLabel("")
+        self.func_tip_label = QLabel("请先导入BIN文件，系统会自动识别ECU并加载当前支持的功能")
         self.func_tip_label.setStyleSheet("""
             QLabel {
                 font-size: 14px;
@@ -1598,7 +1600,7 @@ class ECUFlashWindow(QMainWindow):
         self.func_scroll = QScrollArea()
         self.func_scroll.setWidgetResizable(True)
         self.func_scroll.setFrameShape(QFrame.NoFrame)
-        self.func_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        self.func_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAsNeeded)
         self.func_scroll.setVerticalScrollBarPolicy(Qt.ScrollBarAsNeeded)
         self.func_scroll.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
         self.func_scroll.setMinimumHeight(0)
@@ -1614,19 +1616,36 @@ class ECUFlashWindow(QMainWindow):
                 margin: 10px 4px 10px 0;
                 border-radius: 6px;
             }
+            QScrollBar:horizontal {
+                background: rgba(6, 18, 44, 0.96);
+                height: 12px;
+                margin: 0 10px 4px 10px;
+                border-radius: 6px;
+            }
             QScrollBar::handle:vertical {
                 background: rgba(96, 165, 250, 0.78);
                 min-height: 38px;
                 border-radius: 6px;
             }
-            QScrollBar::handle:vertical:hover {
+            QScrollBar::handle:horizontal {
+                background: rgba(96, 165, 250, 0.78);
+                min-width: 38px;
+                border-radius: 6px;
+            }
+            QScrollBar::handle:vertical:hover,
+            QScrollBar::handle:horizontal:hover {
                 background: rgba(125, 211, 252, 0.92);
             }
             QScrollBar::add-line:vertical,
             QScrollBar::sub-line:vertical,
             QScrollBar::add-page:vertical,
-            QScrollBar::sub-page:vertical {
+            QScrollBar::sub-page:vertical,
+            QScrollBar::add-line:horizontal,
+            QScrollBar::sub-line:horizontal,
+            QScrollBar::add-page:horizontal,
+            QScrollBar::sub-page:horizontal {
                 background: transparent;
+                width: 0;
                 height: 0;
             }
         """)
@@ -1638,7 +1657,7 @@ class ECUFlashWindow(QMainWindow):
         self.func_content_layout.setAlignment(Qt.AlignTop)
         self.func_scroll.setWidget(self.func_content)
         right_layout.addWidget(self.func_scroll, 1)
-        self.load_function_buttons({})
+        self.load_function_buttons({}, refresh_remote=False)
 
         main_content_layout.addWidget(left_panel)
         main_content_layout.addWidget(right_panel)
@@ -1646,15 +1665,34 @@ class ECUFlashWindow(QMainWindow):
         main_content_layout.setStretch(1, 9)
         main_layout.addWidget(main_content)
 
-        auth_label = QLabel("✓ 登录用户: 未登录 | 会话: 未建立")
-        auth_label.setStyleSheet("""
+        self.auth_status_label = QLabel("✓ 用户：未登录 | 状态：未授权")
+        self.auth_status_label.setStyleSheet("""
             QLabel {
                 font-size: 14px;
                 color: #00FF99;
                 margin-top: 8px;
             }
         """)
-        main_layout.addWidget(auth_label, alignment=Qt.AlignRight)
+        main_layout.addWidget(self.auth_status_label, alignment=Qt.AlignRight)
+        self.update_auth_status_label()
+
+    def update_auth_status_label(self):
+        if not self.auth_status_label:
+            return
+        user = self.license_data.get("user") or {}
+        display_name = user.get("name") or user.get("phone") or self.license_data.get("name") or "未登录"
+        if self.is_admin_user:
+            status_text = "管理员"
+        else:
+            auth_status = str(user.get("auth_status") or self.license_data.get("auth_status") or "unauthorized").strip().lower()
+            auth_end_at = user.get("auth_end_at") or self.license_data.get("auth_end_at")
+            if auth_status == "authorized" and auth_end_at:
+                status_text = f"已授权（到期：{auth_end_at}）"
+            elif auth_status == "authorized":
+                status_text = "已授权"
+            else:
+                status_text = "未授权"
+        self.auth_status_label.setText(f"✓ 用户：{display_name} | 状态：{status_text}")
 
     def open_checksum_dialog(self):
         dialog = ChecksumDialog(self)
@@ -1692,11 +1730,30 @@ class ECUFlashWindow(QMainWindow):
             show_message(self, QMessageBox.Warning, "提示", "当前资源没有可下载文件")
             return False
         resolved = _resolve_resource_url(link)
-        if _open_browser_download(resolved):
-            self.add_operation_log(f"浏览器下载已打开：{resolved}")
+        file_name = (item.get("file_name") or item.get("name") or item.get("title") or "resource.bin").strip()
+        try:
+            request = urllib.request.Request(resolved, headers={"Accept": "*/*"})
+            with urllib.request.urlopen(request, timeout=20) as response:
+                data = response.read()
+        except Exception as exc:
+            show_message(self, QMessageBox.Critical, "下载失败", f"资源下载失败：{exc}")
+            return False
+
+        desktop_path = os.path.join(os.path.expanduser("~"), "Desktop")
+        default_path = os.path.join(desktop_path, file_name)
+        save_path, _ = QFileDialog.getSaveFileName(self, "保存资源", default_path, "所有文件 (*.*)")
+        if not save_path:
+            return False
+        try:
+            with open(save_path, "wb") as file_obj:
+                file_obj.write(data)
+            resource_name = str(item.get("name") or item.get("title") or file_name or "未命名接线图").strip()
+            self.add_operation_log(f"接线图下载成功：{resource_name}")
+            show_message(self, QMessageBox.Information, "下载完成", f"文件已保存到：{save_path}")
             return True
-        show_message(self, QMessageBox.Critical, "下载失败", "无法拉起浏览器下载")
-        return False
+        except Exception as exc:
+            show_message(self, QMessageBox.Critical, "保存失败", f"保存文件失败：{exc}")
+            return False
 
     def _view_resource_file(self, item):
         link = (self._resource_preview_url(item) or item.get("url") or item.get("file_url") or "").strip()
@@ -2165,9 +2222,12 @@ class ECUFlashWindow(QMainWindow):
     def add_operation_log(self, log_content):
         if not log_content:
             return
+        log_text = str(log_content).strip()
+        if not log_text.startswith("接线图下载成功："):
+            return
         timestamp = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
         current_log = self.operation_log_area.toPlainText()
-        new_log = f"{current_log}\n[{timestamp}] {log_content}" if current_log else f"[{timestamp}] {log_content}"
+        new_log = f"{current_log}\n[{timestamp}] {log_text}" if current_log else f"[{timestamp}] {log_text}"
         self.operation_log_area.setText(new_log)
         self.operation_log_area.verticalScrollBar().setValue(
             self.operation_log_area.verticalScrollBar().maximum()
@@ -2212,12 +2272,14 @@ class ECUFlashWindow(QMainWindow):
                 self.file_path_edit.setText(file_path)
                 file_size = len(self.file_data)
                 self.file_size_label.setText(f"大小：{file_size} 字节 ({file_size/1024:.2f} KB)")
-                self.identify_btn.setEnabled(True)
                 self.save_btn.setEnabled(False)
                 self._debug_print_dataset_and_matches()
                 self.add_operation_log(f"成功打开文件：{file_path}")
                 self.add_operation_log(f"文件大小：{file_size} 字节 ({file_size/1024:.2f} KB)")
-                self.result_label.setText("识别结果：等待识别")
+                self.result_label.setText("识别结果：正在查询ECU")
+                self.ecu_car_value.setText("车系：未识别")
+                self.ecu_name_value.setText("ECU：未识别")
+                self.identify_hex_value.setText("识别码：未识别")
                 self.current_ecu_info = None
                 self.current_car_type = ""
                 self.current_ecu_name = ""
@@ -2225,6 +2287,7 @@ class ECUFlashWindow(QMainWindow):
                 self.clear_function_buttons()
                 self.load_function_buttons({})
                 self.func_tip_label.show()
+                self.identify_ecu()
             except Exception as e:
                 msg = create_branded_message_box(self)
                 msg.setIcon(QMessageBox.Critical)
@@ -2272,14 +2335,9 @@ class ECUFlashWindow(QMainWindow):
                 msg.exec_()
                 self.add_operation_log(f"保存文件失败：{str(e)}")
 
-    def update_ecu_combobox(self, car_type):
-        self.ecu_combobox.clear()
-        if car_type in ECU_DATABASE:
-            self.ecu_combobox.addItems(ECU_DATABASE[car_type].keys())
-
     def identify_ecu(self):
         try:
-            if not self.file_data:
+            if not self.file_data or not self.file_path:
                 show_message(self, QMessageBox.Warning, "提示", "请先打开BIN文件")
                 return
             if len(self.file_data) == 0:
@@ -2291,79 +2349,71 @@ class ECUFlashWindow(QMainWindow):
                 self.func_tip_label.show()
                 return
 
-            matches = []
-            seen = set()
-            for car_type, ecu_list in ECU_DATABASE.items():
-                for ecu_name, ecu_info in ecu_list.items():
-                    identify_list = ecu_info.get("identify", [])
-                    if not identify_list:
-                        continue
-                    for identify_item in identify_list:
-                        addr = identify_item.get("addr", 0)
-                        length = identify_item.get("length", 0)
-                        expected_hex = identify_item.get("hex_value", "")
-                        if addr < 0 or length <= 0 or (addr + length) > len(self.file_data):
-                            continue
-                        read_data = self.file_data[addr:addr+length]
-                        read_hex = binascii.hexlify(read_data).decode('utf-8').upper()
-                        if read_hex == expected_hex.upper():
-                            key = (car_type, ecu_name, read_hex)
-                            if key not in seen:
-                                seen.add(key)
-                                matches.append({
-                                    "car_type": car_type,
-                                    "ecu_name": ecu_name,
-                                    "ecu_info": ecu_info,
-                                    "identify_code": read_hex,
-                                })
-                            break
+            result = _api_upload_file("/bin/identify", self.file_path, token=self.license_data.get("token"))
+            match_car_type = result.get("车系") or ""
+            match_ecu_name = result.get("ECU名称") or ""
+            match_identify_code = ((result.get("识别码") or {}).get("识别十六进制") or "").upper()
+            functions = result.get("功能列表") or []
 
-            if not matches:
-                show_message(self, QMessageBox.Warning, "提示", "暂不支持该ECU的数据 请联系售后")
-                self.result_label.setText("识别结果：识别失败")
-                self.add_operation_log("ECU识别失败：暂不支持该ECU数据")
-                self.clear_function_buttons()
-                self.load_function_buttons({})
-                self.func_tip_label.show()
-                return
+            runtime_functions = {}
+            for func in functions:
+                func_name = str(func.get("功能名称") or "").strip()
+                if not func_name:
+                    continue
+                patches = []
+                for idx, patch in enumerate(func.get("需要修改的地址") or [], start=1):
+                    addr_text = str(patch.get("地址") or "0")
+                    length_text = str(patch.get("长度") or "0")
+                    value_text = str(patch.get("值") or "")
+                    try:
+                        addr = int(addr_text, 16) if addr_text.lower().startswith("0x") else int(addr_text)
+                    except Exception:
+                        addr = 0
+                    try:
+                        length = int(length_text)
+                    except Exception:
+                        length = 0
+                    patches.append({
+                        "addr": addr,
+                        "length": length,
+                        "value": value_text.upper(),
+                    })
+                runtime_functions[func_name] = {
+                    "name": func_name,
+                    "success_msg": func.get("成功提示") or "修改完成",
+                    "modifications_map": {
+                        match_identify_code: patches,
+                    },
+                }
 
-            selected_match = matches[0]
-            if len(matches) > 1:
-                selected_match = self.select_ecu_candidate(matches)
-            if selected_match and len(matches) == 1:
-                family_candidates = self._expand_same_family_candidates(selected_match)
-                if len(family_candidates) > 1:
-                    selected_match = self.select_ecu_candidate(family_candidates)
-            if not selected_match:
-                self.add_operation_log("ECU识别取消：用户未选择具体型号")
-                return
-
-            match_car_type = selected_match["car_type"]
-            match_ecu_name = selected_match["ecu_name"]
-            match_ecu_info = selected_match["ecu_info"]
-            match_identify_code = selected_match["identify_code"]
-
-            self.current_ecu_info = match_ecu_info
+            self.current_ecu_info = {
+                "identify": [{
+                    "addr": result.get("识别码", {}).get("识别地址1", ""),
+                    "length": result.get("识别码", {}).get("识别长度1", ""),
+                    "hex_value": match_identify_code,
+                }],
+                "functions": runtime_functions,
+            }
             self.current_car_type = match_car_type
             self.current_ecu_name = match_ecu_name
             self.current_identify_code = match_identify_code
 
-            success_msg = create_branded_message_box(self)
-            success_msg.setIcon(QMessageBox.Information)
-            success_msg.setWindowTitle("识别成功")
-            success_msg.setText(f"已识别到ECU型号为：{match_car_type} {match_ecu_name}")
-            success_msg.setStyleSheet("QLabel{color:black; font-size:16px; font-weight:bold;} QPushButton{background:#0078D7; color:white; font-size:14px; padding:8px 20px;}")
-            success_msg.exec_()
-
-            self.car_combobox.setCurrentText(match_car_type)
-            self.update_ecu_combobox(match_car_type)
-            self.ecu_combobox.setCurrentText(match_ecu_name)
+            self.ecu_car_value.setText(f"车系：{match_car_type or '-'}")
+            self.ecu_name_value.setText(f"ECU：{match_ecu_name or '-'}")
+            self.identify_hex_value.setText(f"识别码：{match_identify_code or '-'}")
             self.result_label.setText(f"识别结果：识别成功 - {match_car_type} {match_ecu_name}")
             self.add_operation_log(f"ECU识别成功：{match_car_type} - {match_ecu_name}")
-            self.load_function_buttons(match_ecu_info.get("functions", {}))
+            self.load_function_buttons(runtime_functions)
         except Exception as e:
-            show_message(self, QMessageBox.Critical, "错误", f"识别 ECU 失败：{e}")
-            self.add_operation_log(f"识别 ECU 失败：{e}")
+            show_message(self, QMessageBox.Warning, "提示", f"暂不支持该ECU的数据 请联系售后\n{e}")
+            self.result_label.setText("识别结果：识别失败")
+            self.ecu_car_value.setText("车系：未识别")
+            self.ecu_name_value.setText("ECU：未识别")
+            self.identify_hex_value.setText("识别码：未识别")
+            self.add_operation_log(f"ECU识别失败：{e}")
+            self.clear_function_buttons()
+            self.load_function_buttons({})
+            self.func_tip_label.show()
 
     def clear_function_buttons(self):
         while self.func_content_layout.count():
@@ -2411,6 +2461,7 @@ class ECUFlashWindow(QMainWindow):
         for card in cards:
             row_layout.addWidget(card, 0, Qt.AlignLeft)
         row_layout.addStretch()
+        row_widget.setMinimumWidth(scaled_px(1110))
         self.func_content_layout.addWidget(row_widget)
 
     def _append_builtin_cards(self):
@@ -2422,29 +2473,31 @@ class ECUFlashWindow(QMainWindow):
         cards.append(self._create_function_card("三项未就绪", is_allowed=True, placeholder=True))
         self._append_function_row(cards)
 
-    def load_function_buttons(self, functions):
-        self.refresh_user_permissions(silent=True)
+    def load_function_buttons(self, functions, refresh_remote=False):
+        if refresh_remote:
+            self.refresh_user_permissions(silent=True)
         self.clear_function_buttons()
-        self.func_tip_label.show()
         self.func_scroll.verticalScrollBar().setValue(0)
+        self.func_scroll.horizontalScrollBar().setValue(0)
         cards = self._append_builtin_cards()
         runtime_functions = functions if isinstance(functions, dict) else {}
-        all_function_names = list(ALL_FUNCTION_NAMES or [])
-        if not all_function_names:
-            all_function_names = _collect_all_function_names(ECU_DATABASE)
-        if not all_function_names:
-            if not runtime_functions:
-                self.show_default_step3_button()
-                return
-            all_function_names = list(runtime_functions.keys())
-        for func_name in all_function_names:
-            runtime_func_info = dict(runtime_functions.get(func_name) or {})
+        if not runtime_functions:
+            self.func_tip_label.show()
+            self._append_function_row(cards)
+            self.func_content_layout.addStretch()
+            self.func_content.adjustSize()
+            self.func_content.resize(self.func_content.sizeHint())
+            return
+
+        self.func_tip_label.hide()
+
+        for func_name, func_info in runtime_functions.items():
+            runtime_func_info = dict(func_info or {})
             runtime_func_info.setdefault("name", func_name)
-            is_allowed = self.is_function_allowed(runtime_func_info)
             cards.append(
                 self._create_function_card(
                     func_name,
-                    is_allowed=is_allowed,
+                    is_allowed=True,
                     on_click=lambda checked=False, fn=func_name, fi=runtime_func_info: self.execute_function(fn, fi),
                 )
             )
@@ -2457,17 +2510,14 @@ class ECUFlashWindow(QMainWindow):
         if row_cards:
             self._append_function_row(row_cards)
         self.func_content_layout.addStretch()
+        self.func_content.adjustSize()
+        self.func_content.resize(self.func_content.sizeHint())
 
     def execute_function(self, func_name, func_info):
         try:
-            self.refresh_user_permissions(silent=True)
             if str((self.purchase_config or {}).get("force_update", "0")) == "1":
                 self.add_operation_log(f"功能执行被拦截：{func_name}（强制更新）")
                 show_message(self, QMessageBox.Warning, "强制更新", (self.purchase_config or {}).get("update_notice") or "当前版本需要强制更新，请先完成更新。")
-                return
-            if not self.is_function_allowed(func_info):
-                self.add_operation_log(f"功能执行被拦截：{func_name}（无权限）")
-                self.show_purchase_dialog(func_name)
                 return
             if not self.file_data or not self.current_ecu_info or not self.current_identify_code:
                 show_message(self, QMessageBox.Warning, "提示", "请先打开文件并识别ECU")
@@ -2548,11 +2598,17 @@ class ECUFlashWindow(QMainWindow):
             self.allowed_function_names = permissions["names"]
             self.license_data["permission_function_ids"] = sorted(self.allowed_function_ids)
             self.license_data["permission_function_names"] = sorted(self.allowed_function_names)
+            self.license_data["auth_end_at"] = permissions.get("auth_end_at")
+            self.license_data["auth_status"] = permissions.get("auth_status") or "unauthorized"
+            if isinstance(self.license_data.get("user"), dict):
+                self.license_data["user"]["auth_end_at"] = self.license_data["auth_end_at"]
+                self.license_data["user"]["auth_status"] = self.license_data["auth_status"]
             try:
                 self.purchase_config = fetch_purchase_config(token)
                 self.license_data["purchase_config"] = self.purchase_config
             except Exception:
                 pass
+            self.update_auth_status_label()
             save_session_data(self.license_data)
             if not silent:
                 if self.is_admin_user:
@@ -2566,45 +2622,7 @@ class ECUFlashWindow(QMainWindow):
             return False
 
     def is_function_allowed(self, func_info):
-        if self.is_admin_user:
-            return True
-        if not isinstance(func_info, dict):
-            return False
-        func_name = str(func_info.get("name") or func_info.get("function_name") or "").strip()
-        free_names = set(self.purchase_config.get("free_feature_names") or [])
-        if func_name and func_name in free_names:
-            return True
-        if func_name and func_name in self.allowed_function_names:
-            return True
-        function_id = func_info.get("function_id")
-        if function_id is None:
-            return False
-        try:
-            return int(function_id) in self.allowed_function_ids
-        except Exception:
-            return False
-
-    def search_ecu_by_name(self):
-        keyword = self.search_ecu_edit.text().strip().lower()
-        if not keyword:
-            return
-        found_car = None
-        found_ecu = None
-        for car_type, ecu_list in ECU_DATABASE.items():
-            for ecu_name in ecu_list.keys():
-                if keyword in ecu_name.lower():
-                    found_car = car_type
-                    found_ecu = ecu_name
-                    break
-            if found_car:
-                break
-        if not found_car or not found_ecu:
-            show_message(self, QMessageBox.Warning, "提示", "未找到匹配的 ECU 型号。")
-            return
-        self.car_combobox.setCurrentText(found_car)
-        self.update_ecu_combobox(found_car)
-        self.ecu_combobox.setCurrentText(found_ecu)
-        self.add_operation_log(f"搜索定位：{found_car} → {found_ecu}")
+        return True
 
     def _mark_update_notice_seen(self):
         latest_version = str((self.purchase_config or {}).get("latest_version") or "").strip()
@@ -2624,14 +2642,8 @@ class ECUFlashWindow(QMainWindow):
         return latest_version != str(self.license_data.get("last_seen_update_version") or "").strip()
 
     def _patch_runtime_ui(self):
-        if hasattr(self, "search_ecu_edit"):
-            self.search_ecu_edit.clear()
-            self.search_ecu_edit.setPlaceholderText("输入 ECU 型号后回车，例如 ME7.8.8")
         if hasattr(self, "logout_btn"):
             self.logout_btn.clicked.connect(self.logout_and_relogin)
-        if self._should_show_update_notice_once():
-            self.show_log_dialog(auto_open=True)
-        self.refresh_user_permissions(silent=True)
 
     def show_purchase_dialog(self, func_name=""):
         cfg = self.purchase_config or {}
@@ -2850,28 +2862,6 @@ def main():
         license_data = dialog.session_data or check_license()
         if not license_data:
             show_message(None, QMessageBox.Critical, "错误", "登录完成后未能读取会话信息。")
-            return 1
-
-    try:
-        load_remote_runtime_dataset(license_data["token"])
-    except Exception as exc:
-        exc_text = str(exc)
-        if "401" in exc_text or "Unauthorized" in exc_text:
-            clear_session_data()
-            relogin = RegisterDialog()
-            if relogin.exec_() != QDialog.Accepted:
-                return 0
-            license_data = relogin.session_data or check_license()
-            if not license_data:
-                show_message(None, QMessageBox.Critical, "错误", "重新登录后未能读取会话信息。")
-                return 1
-            try:
-                load_remote_runtime_dataset(license_data["token"])
-            except Exception as relogin_exc:
-                show_message(None, QMessageBox.Critical, "接口错误", f"重新登录后仍无法加载服务端数据：{relogin_exc}", f"接口地址：{API_BASE_URL}")
-                return 1
-        else:
-            show_message(None, QMessageBox.Critical, "接口错误", f"无法加载服务端数据：{exc}", f"接口地址：{API_BASE_URL}")
             return 1
 
     window = MergedMainWindow(license_data)

@@ -1,8 +1,9 @@
 import json
-from typing import Dict, List, Set
+from datetime import datetime
+from typing import Dict, List, Set, Optional
 from urllib.parse import quote, unquote
 
-from fastapi import APIRouter, Depends, HTTPException, Query
+from fastapi import APIRouter, Depends, HTTPException, Query, UploadFile, File
 from fastapi.responses import RedirectResponse, Response
 from sqlalchemy import text
 
@@ -22,6 +23,13 @@ from app.settings import settings
 from app.security import get_current_user
 
 router = APIRouter(prefix="/api/v1", tags=["ecu"])
+
+
+def _is_user_authorized(user: dict) -> bool:
+    if user.get("is_admin"):
+        return True
+    auth_end_at = user.get("auth_end_at")
+    return bool(auth_end_at and str(auth_end_at) > datetime.now().strftime("%Y-%m-%d %H:%M:%S"))
 
 
 def _get_user_allowed_function_ids(user_id: int) -> set[int]:
@@ -145,10 +153,9 @@ def list_functions(ecu_model_id: int, user: dict = Depends(get_current_user)) ->
     )
     with get_conn() as conn:
         rows = conn.execute(sql, {"ecu_model_id": ecu_model_id}).mappings().all()
-    if user.get("is_admin"):
+    if user.get("is_admin") or _is_user_authorized(user):
         return [FunctionOut(**row) for row in rows]
-    allowed_names = _get_user_allowed_function_names(int(user["id"]))
-    return [FunctionOut(**row) for row in rows if str(row["name"]).strip() in allowed_names]
+    return [FunctionOut(**row) for row in rows if str(row["name"]).strip() in {"接线图查询", "资料下载", "文件下载", "学习资料"}]
 
 
 @router.get("/functions/{function_id}/patches", response_model=FunctionPatchesOut)
@@ -285,6 +292,134 @@ def _list_all_enabled_function_names() -> list[str]:
         if name:
             names.append(name)
     return names
+
+
+def _match_bin_payload(bin_data: bytes) -> Optional[dict]:
+    models_sql = text(
+        """
+        SELECT m.id AS ecu_model_id, m.name AS ecu_name, cs.name AS car_series
+        FROM ecu_model m
+        JOIN ecu_car_series cs ON cs.id = m.car_series_id
+        WHERE m.is_enabled = 1
+        ORDER BY m.sort_order ASC, m.id ASC
+        """
+    )
+    identify_sql = text(
+        """
+        SELECT id, ecu_model_id, addr, data_length, hex_value
+        FROM ecu_identify_rule
+        ORDER BY id ASC
+        """
+    )
+    functions_sql = text(
+        """
+        SELECT id, ecu_model_id, name, success_msg
+        FROM ecu_function
+        WHERE is_enabled = 1
+        ORDER BY sort_order ASC, id ASC
+        """
+    )
+    variants_sql = text(
+        """
+        SELECT id, function_id, identify_hex
+        FROM ecu_function_variant
+        ORDER BY id ASC
+        """
+    )
+    patches_sql = text(
+        """
+        SELECT variant_id, seq_no, addr, data_length, value_hex
+        FROM ecu_function_patch
+        ORDER BY seq_no ASC, id ASC
+        """
+    )
+
+    with get_conn() as conn:
+        models = conn.execute(models_sql).mappings().all()
+        identify_rows = conn.execute(identify_sql).mappings().all()
+        function_rows = conn.execute(functions_sql).mappings().all()
+        variant_rows = conn.execute(variants_sql).mappings().all()
+        patch_rows = conn.execute(patches_sql).mappings().all()
+
+    model_map = {int(row["ecu_model_id"]): row for row in models}
+    variants_by_function: dict[int, list[dict]] = {}
+    for row in variant_rows:
+        variants_by_function.setdefault(int(row["function_id"]), []).append(dict(row))
+
+    patches_by_variant: dict[int, list[dict]] = {}
+    for row in patch_rows:
+        patches_by_variant.setdefault(int(row["variant_id"]), []).append(
+            {
+                "地址": hex(int(row["addr"])),
+                "长度": str(int(row["data_length"])),
+                "值": str(row["value_hex"] or "").upper(),
+            }
+        )
+
+    functions_by_model: dict[int, list[dict]] = {}
+    for row in function_rows:
+        functions_by_model.setdefault(int(row["ecu_model_id"]), []).append(dict(row))
+
+    for rule in identify_rows:
+        addr = int(rule["addr"])
+        length = int(rule["data_length"])
+        if addr < 0 or length <= 0 or addr + length > len(bin_data):
+            continue
+        identify_hex = bin_data[addr:addr + length].hex().upper()
+        expected_hex = str(rule["hex_value"] or "").upper()
+        if identify_hex != expected_hex:
+            continue
+
+        model = model_map.get(int(rule["ecu_model_id"]))
+        if not model:
+            continue
+
+        function_list = []
+        for func in functions_by_model.get(int(rule["ecu_model_id"]), []):
+            matched_variant = None
+            for variant in variants_by_function.get(int(func["id"]), []):
+                if str(variant["identify_hex"] or "").upper() == identify_hex:
+                    matched_variant = variant
+                    break
+            if not matched_variant:
+                continue
+            function_list.append(
+                {
+                    "function_id": int(func["id"]),
+                    "功能名称": str(func["name"] or ""),
+                    "成功提示": str(func.get("success_msg") or ""),
+                    "需要修改的地址": patches_by_variant.get(int(matched_variant["id"]), []),
+                }
+            )
+
+        return {
+            "车系": str(model["car_series"] or ""),
+            "品牌": "",
+            "ECU名称": str(model["ecu_name"] or ""),
+            "ecu_model_id": int(model["ecu_model_id"]),
+            "identify_hex": identify_hex,
+            "识别码": {
+                "识别地址1": hex(addr),
+                "识别长度1": str(length),
+                "识别十六进制": identify_hex,
+            },
+            "功能列表": function_list,
+        }
+    return None
+
+
+@router.post("/bin/identify")
+def identify_bin(file: UploadFile = File(...), user: dict = Depends(get_current_user)) -> dict:
+    content = file.file.read()
+    if not content:
+        raise HTTPException(status_code=400, detail="empty bin file")
+    matched = _match_bin_payload(content)
+    if not matched:
+        raise HTTPException(status_code=404, detail="ecu not supported")
+    if user.get("is_admin") or _is_user_authorized(user):
+        return matched
+    matched["功能列表"] = []
+    return matched
 
 
 def _build_runtime_dataset_payload(user: dict) -> dict:
