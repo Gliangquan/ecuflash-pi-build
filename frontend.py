@@ -48,7 +48,7 @@ def _resource_path(*parts):
     return os.path.join(base_dir, *parts)
 
 
-API_BASE_URL = os.environ.get("ECUFLASH_API_BASE_URL", "http://127.0.0.1:8000/api/v1").rstrip("/")
+API_BASE_URL = os.environ.get("ECUFLASH_API_BASE_URL", "http://107.148.176.142:8000/api/v1").rstrip("/")
 APP_VERSION = "1.0.0"
 APP_LOGO_FILE = "icon.jpg"
 APP_LOGO_URL = ""
@@ -697,6 +697,21 @@ def _filter_resource_items(items, keyword):
     return [item for item in (items or []) if query in _resource_item_search_text(item)]
 
 
+def _parse_config_list(raw_text):
+    if isinstance(raw_text, list):
+        return [item for item in raw_text if isinstance(item, dict)]
+    text = str(raw_text or "").strip()
+    if not text:
+        return []
+    try:
+        data = json.loads(text)
+    except Exception:
+        return []
+    if not isinstance(data, list):
+        return []
+    return [item for item in data if isinstance(item, dict)]
+
+
 def _resolve_resource_url(url):
     text = (url or "").strip()
     if not text:
@@ -801,6 +816,13 @@ def _normalize_learning_article_html(content_html):
         return f" {attr_name}={quote}{resolved}{quote}"
 
     html = re.sub(r"\s(src|href)\s*=\s*([\"'])(.*?)\2", _replace_url_attr, html, flags=re.IGNORECASE)
+    html = re.sub(
+        r"<p>\s*(<img[^>]+>)\s*</p>",
+        r"<div class='article-image'>\1</div>",
+        html,
+        flags=re.IGNORECASE,
+    )
+    html = re.sub(r"\n+", "", html)
     return html
 
 
@@ -1338,7 +1360,7 @@ class ECUFlashWindow(QMainWindow):
                 font-weight: bold;
                 color: #00CCFF;
                 letter-spacing: 0.5px;
-                margin-top: 2px;
+                margin-top: 14px;
                 padding: 2px 0 4px 2px;
             }
         """)
@@ -1557,7 +1579,7 @@ class ECUFlashWindow(QMainWindow):
         """)
         right_layout.addWidget(func_title)
 
-        self.func_tip_label = QLabel("提示：请打开文件后 点击ECU识别再操作功能")
+        self.func_tip_label = QLabel("")
         self.func_tip_label.setStyleSheet("""
             QLabel {
                 font-size: 14px;
@@ -1578,13 +1600,34 @@ class ECUFlashWindow(QMainWindow):
         self.func_scroll.setFrameShape(QFrame.NoFrame)
         self.func_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
         self.func_scroll.setVerticalScrollBarPolicy(Qt.ScrollBarAsNeeded)
-        self.func_scroll.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
-        self.func_scroll.setFixedHeight(scaled_px(430))
+        self.func_scroll.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
+        self.func_scroll.setMinimumHeight(0)
         self.func_scroll.setStyleSheet("""
             QScrollArea {
                 background-color: rgba(8, 22, 52, 0.88);
                 border: 1px solid rgba(73, 112, 196, 0.34);
                 border-radius: 16px;
+            }
+            QScrollBar:vertical {
+                background: rgba(6, 18, 44, 0.96);
+                width: 12px;
+                margin: 10px 4px 10px 0;
+                border-radius: 6px;
+            }
+            QScrollBar::handle:vertical {
+                background: rgba(96, 165, 250, 0.78);
+                min-height: 38px;
+                border-radius: 6px;
+            }
+            QScrollBar::handle:vertical:hover {
+                background: rgba(125, 211, 252, 0.92);
+            }
+            QScrollBar::add-line:vertical,
+            QScrollBar::sub-line:vertical,
+            QScrollBar::add-page:vertical,
+            QScrollBar::sub-page:vertical {
+                background: transparent;
+                height: 0;
             }
         """)
         self.func_content = QWidget()
@@ -1594,10 +1637,8 @@ class ECUFlashWindow(QMainWindow):
         self.func_content_layout.setSpacing(scaled_px(14))
         self.func_content_layout.setAlignment(Qt.AlignTop)
         self.func_scroll.setWidget(self.func_content)
-        right_layout.addWidget(self.func_scroll)
-        self.show_default_step3_button()
-
-        right_layout.addStretch()
+        right_layout.addWidget(self.func_scroll, 1)
+        self.load_function_buttons({})
 
         main_content_layout.addWidget(left_panel)
         main_content_layout.addWidget(right_panel)
@@ -2004,10 +2045,6 @@ class ECUFlashWindow(QMainWindow):
         subtitle.setStyleSheet("font-size:14px;color:#94A3B8;")
         layout.addWidget(subtitle)
 
-        tip_label = QLabel("双击正文图片可放大查看")
-        tip_label.setStyleSheet("font-size:13px;color:#7DD3FC;")
-        layout.addWidget(tip_label)
-
         content_frame = QFrame()
         content_layout = QVBoxLayout(content_frame)
         content_layout.setContentsMargins(16, 16, 16, 16)
@@ -2026,19 +2063,21 @@ class ECUFlashWindow(QMainWindow):
         content_view.setOpenLinks(True)
         content_view.setStyleSheet("background:rgba(3,10,28,0.96);color:#E5E7EB;border:none;font-size:16px;padding:12px;")
         content_view.document().setDefaultStyleSheet(
-            "html,body{background:transparent;color:#E5E7EB;}"
-            "p,div,span,li,td,th{background:transparent;color:#E5E7EB;line-height:2.0;font-size:16px;}"
-            "h1,h2,h3,h4,h5,h6{background:transparent;color:#CFE4FF;margin:22px 0 12px 0;}"
+            "html,body{background:transparent;color:#E5E7EB;margin:0;padding:0;}"
+            "p{background:transparent;color:#E5E7EB;line-height:1.45;font-size:16px;margin:1px 0;}"
+            "div,span,li,td,th{background:transparent;color:#E5E7EB;font-size:16px;margin:0;padding:0;}"
+            "div.article-image{margin:2px 0;text-align:center;}"
+            "h1,h2,h3,h4,h5,h6{background:transparent;color:#CFE4FF;margin:8px 0 4px 0;}"
             "a{color:#7DD3FC;}"
-            "table{width:100%;background:transparent;border-collapse:collapse;color:#E5E7EB;margin:14px 0;}"
-            "td,th{border:1px solid rgba(148,163,184,0.35);padding:10px;}"
-            "img{display:block;background:transparent;border-radius:12px;max-width:340px;max-height:460px;width:auto;height:auto;margin:14px auto;}"
-            "ul,ol{margin:10px 0 10px 22px;}"
-            "blockquote{border-left:3px solid rgba(125,211,252,0.55);padding-left:12px;color:#CBD5E1;}"
+            "table{width:100%;background:transparent;border-collapse:collapse;color:#E5E7EB;margin:6px 0;}"
+            "td,th{border:1px solid rgba(148,163,184,0.35);padding:8px;}"
+            "img{display:block;background:transparent;border-radius:12px;max-width:340px;max-height:460px;width:auto;height:auto;margin:2px auto;}"
+            "ul,ol{margin:4px 0 4px 22px;}"
+            "blockquote{border-left:3px solid rgba(125,211,252,0.55);padding-left:12px;color:#CBD5E1;margin:6px 0;}"
         )
         content_view.setHtml(
-            "<html><body style='background:transparent;color:#E5E7EB;'>"
-            f"<div style='color:#E5E7EB;font-size:16px;line-height:2.0;'>{article_html or '<p>暂无图文内容</p>'}</div>"
+            "<html><body style='background:transparent;color:#E5E7EB;margin:0;padding:0;'>"
+            f"<div style='color:#E5E7EB;font-size:16px;line-height:1.45;margin:0;padding:0;'>{article_html or '<p>暂无图文内容</p>'}</div>"
             "</body></html>"
         )
         content_layout.addWidget(content_view, 1)
@@ -2184,7 +2223,7 @@ class ECUFlashWindow(QMainWindow):
                 self.current_ecu_name = ""
                 self.current_identify_code = ""
                 self.clear_function_buttons()
-                self.show_default_step3_button()
+                self.load_function_buttons({})
                 self.func_tip_label.show()
             except Exception as e:
                 msg = create_branded_message_box(self)
@@ -2248,7 +2287,7 @@ class ECUFlashWindow(QMainWindow):
                 self.result_label.setText("识别结果：识别失败")
                 self.add_operation_log("ECU识别失败：文件为空")
                 self.clear_function_buttons()
-                self.show_default_step3_button()
+                self.load_function_buttons({})
                 self.func_tip_label.show()
                 return
 
@@ -2284,7 +2323,7 @@ class ECUFlashWindow(QMainWindow):
                 self.result_label.setText("识别结果：识别失败")
                 self.add_operation_log("ECU识别失败：暂不支持该ECU数据")
                 self.clear_function_buttons()
-                self.show_default_step3_button()
+                self.load_function_buttons({})
                 self.func_tip_label.show()
                 return
 
@@ -2386,7 +2425,7 @@ class ECUFlashWindow(QMainWindow):
     def load_function_buttons(self, functions):
         self.refresh_user_permissions(silent=True)
         self.clear_function_buttons()
-        self.func_tip_label.hide()
+        self.func_tip_label.show()
         self.func_scroll.verticalScrollBar().setValue(0)
         cards = self._append_builtin_cards()
         runtime_functions = functions if isinstance(functions, dict) else {}
@@ -2417,6 +2456,7 @@ class ECUFlashWindow(QMainWindow):
                 row_cards = []
         if row_cards:
             self._append_function_row(row_cards)
+        self.func_content_layout.addStretch()
 
     def execute_function(self, func_name, func_info):
         try:
@@ -2753,14 +2793,7 @@ class ECUFlashWindow(QMainWindow):
         notice_view = QTextEdit(dialog)
         notice_view.setReadOnly(True)
         notice_view.setPlainText(notice_text or "暂无更新说明")
-        layout.addWidget(notice_view, 3)
-        log_title = QLabel("本地操作日志")
-        log_title.setStyleSheet("color:#FBBF24; font-size:18px; font-weight:bold;")
-        layout.addWidget(log_title)
-        log_view = QTextEdit(dialog)
-        log_view.setReadOnly(True)
-        log_view.setPlainText(self.operation_log_area.toPlainText() or "暂无操作日志")
-        layout.addWidget(log_view, 2)
+        layout.addWidget(notice_view, 1)
         button_row = QHBoxLayout()
         button_row.addStretch()
         if latest_download_url:
